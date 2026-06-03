@@ -54,12 +54,12 @@ def get_quotes(symbols):
             price = float(c5.iloc[-1]); prev = float(c5.iloc[-2]) if len(c5)>=2 else price
             chg = ((price-prev)/prev*100) if prev else 0
             info = info_map.get(sym, {})
-            # pre/post market
-            pre_price  = info.get('preMarketPrice') or 0
-            pre_chg    = info.get('preMarketChangePercent') or 0
-            post_price = info.get('postMarketPrice') or 0
-            post_chg   = info.get('postMarketChangePercent') or 0
+            # pre/post market — compute chg% from prices directly
+            pre_price  = float(info.get('preMarketPrice') or 0)
+            post_price = float(info.get('postMarketPrice') or 0)
             mkt_state  = info.get('marketState', 'CLOSED')
+            pre_chg_pct  = ((pre_price  - price) / price * 100) if pre_price  and price else 0
+            post_chg_pct = ((post_price - price) / price * 100) if post_price and price else 0
             results.append({
                 "symbol": sym, "shortName": info.get("shortName", sym),
                 "regularMarketPrice": round(price,2),
@@ -69,10 +69,10 @@ def get_quotes(symbols):
                 "marketCap": int(info.get("marketCap") or 0),
                 "fiftyTwoWeekHigh": round(float(c1y.max()),2) if len(c1y) else round(price,2),
                 "fiftyTwoWeekLow":  round(float(c1y.min()),2) if len(c1y) else round(price,2),
-                "preMarketPrice": round(pre_price,2) if pre_price else 0,
-                "preMarketChangePercent": round(float(pre_chg)*100,2) if pre_chg and abs(float(pre_chg)) < 1 else round(float(pre_chg),2) if pre_chg else 0,
-                "postMarketPrice": round(post_price,2) if post_price else 0,
-                "postMarketChangePercent": round(float(post_chg)*100,2) if post_chg and abs(float(post_chg)) < 1 else round(float(post_chg),2) if post_chg else 0,
+                "preMarketPrice":  round(pre_price,2),
+                "preMarketChangePercent":  round(pre_chg_pct,2),
+                "postMarketPrice": round(post_price,2),
+                "postMarketChangePercent": round(post_chg_pct,2),
                 "marketState": mkt_state,
             })
             print(f"  OK  {sym:6}  ${round(price,2)}")
@@ -214,7 +214,7 @@ def get_rule_prediction(symbol, d, timeframe):
     if timeframe=='today':
         t_up = round(price*1.018,2); t_dn = round(price*0.988,2)
         if chg>3 and vr>1.5:
-            return f"📈 STRONG BULL: {chg:+.2f}% gain with {vr:.1f}x volume = institutional accumulation confirmed. Momentum continuation likely. Intraday target ${t_up}. Hold above entry; trail stop up. Avoid chasing — wait for any dip to entry zone."
+            return f"PRICE TARGET: ${t_up}\n\n📈 STRONG BULL: {chg:+.2f}% gain with {vr:.1f}x volume = institutional accumulation confirmed. Momentum continuation likely. Hold above entry, trail stop up. Avoid chasing — wait for dip to entry zone."
         elif chg>1:
             return f"📈 MILD BULL: Positive {chg:+.2f}% with {vr:.1f}x volume. Price action constructive. Intraday target ${t_up} if volume holds. Risk: reversal to ${t_dn} if broad market weakens. Best entry on pullback to entry zone."
         elif chg<-3 and vr>1.5:
@@ -235,7 +235,9 @@ def get_rule_prediction(symbol, d, timeframe):
 
     else:  # year
         bull=round(hi52*1.18,2); base=round(price*1.12,2); bear=round(lo52*1.15,2)
-        return f"🎯 YEAR-END OUTLOOK: Bull case ${bull} (+18% from 52-wk high ${hi52:.2f}) if AI/sector tailwinds sustain and earnings beat consensus. Base case ${base} (+12% from current). Bear case ${bear} on macro deterioration. Current position {((price-lo52)/(hi52-lo52)*100):.0f}% through 52-week range. {'Mega-cap with $'+str(round(mc/1e9,0))+'B market cap = institutional support floor.' if mc>50e9 else 'Mid-cap volatility means wider outcome range.'} Key risk: Fed rate path and Q3/Q4 earnings season."
+        pos = round(((price-lo52)/(hi52-lo52)*100),0) if (hi52-lo52)>0 else 50
+        cap_str = f"${round(mc/1e9,1)}B market cap" if mc>1e9 else "smaller-cap"
+        return f"PRICE TARGET: ${base} base · ${bull} bull · ${bear} bear\n\n🎯 YEAR-END OUTLOOK: Bull case ${bull} (+18% from 52-wk high) if sector tailwinds sustain. Base case ${base} (+12% from current price). Bear case ${bear} on macro deterioration. At {pos:.0f}% of 52-week range. {cap_str}. Key risks: Fed rate path, earnings revisions, sector rotation."
 
 def get_ai_prediction(symbol, d, news, timeframe):
     price = d.get('regularMarketPrice',0)
@@ -245,7 +247,7 @@ def get_ai_prediction(symbol, d, news, timeframe):
     mc    = d.get('marketCap',0)
     news_text = ' | '.join([n['title'] for n in news[:4]])
     tf_prompts = {
-        'today': f"You are a professional day trader. {symbol} is trading at ${price} ({chg:+.2f}% today). 52-week range: ${lo52:.2f}–${hi52:.2f}. Market cap: ${mc/1e9:.0f}B. Latest news: {news_text}. Give a sharp 2-3 sentence TODAY intraday prediction: direction, specific price target, key level to watch. Be direct like a trader, not a disclaimer-heavy analyst.",
+        'today': f"You are a professional day trader. {symbol} is at ${price} ({chg:+.2f}% today). 52-week range: ${lo52:.2f}–${hi52:.2f}. Market cap: ${mc/1e9:.0f}B. News: {news_text}. Start your response with exactly: PRICE TARGET: $[number]\n\nThen give 2-3 sharp sentences on direction, key level, and whether to hold or exit before close. Be direct.",
         'week':  f"You are a swing trader analyst. {symbol} at ${price} ({chg:+.2f}% today). 52-week range: ${lo52:.2f}–${hi52:.2f}. News: {news_text}. Give a 2-3 sentence END-OF-WEEK prediction: expected close price range, key catalyst, and whether to hold calls/puts through Friday. Be specific and actionable.",
         'year':  f"You are a senior equity analyst. {symbol} at ${price}. 52-week range: ${lo52:.2f}–${hi52:.2f}. Market cap: ${mc/1e9:.0f}B. News context: {news_text}. Give a 2-3 sentence YEAR-END 2025 price target with bull/bear/base case prices. Include the single biggest risk to the thesis. Be specific."
     }
@@ -301,17 +303,29 @@ def predict():
     sym=request.args.get('symbol','').strip().upper()
     tf=request.args.get('timeframe','today')
     if not sym: return cors({"prediction":"No symbol provided","ai":False})
-    # Get stock data
-    d={}
-    try:
-        info=yf.Ticker(sym).info or {}
-        d={"regularMarketPrice":info.get("currentPrice") or info.get("regularMarketPrice",0),
-           "regularMarketChangePercent":info.get("regularMarketChangePercent",0),
-           "fiftyTwoWeekHigh":info.get("fiftyTwoWeekHigh",0),
-           "fiftyTwoWeekLow":info.get("fiftyTwoWeekLow",0),
-           "marketCap":info.get("marketCap",0),
-           "volumeRatio":(info.get("regularMarketVolume",1))/(info.get("averageVolume",1) or 1)}
-    except: pass
+    # Use data passed from frontend (already fetched, no re-fetch needed)
+    price = float(request.args.get('price',0) or 0)
+    chg   = float(request.args.get('chg',0) or 0)
+    hi52  = float(request.args.get('hi52',0) or 0)
+    lo52  = float(request.args.get('lo52',0) or 0)
+    vr    = float(request.args.get('vr',1) or 1)
+    mc    = int(float(request.args.get('mc',0) or 0))
+    # If price not passed, fall back to yfinance
+    if not price:
+        try:
+            info=yf.Ticker(sym).info or {}
+            price=float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
+            raw_chg=info.get("regularMarketChangePercent",0) or 0
+            chg=float(raw_chg)*100 if abs(float(raw_chg))<1 else float(raw_chg)
+            hi52=float(info.get("fiftyTwoWeekHigh") or 0)
+            lo52=float(info.get("fiftyTwoWeekLow") or 0)
+            mc=int(info.get("marketCap") or 0)
+            vol=int(info.get("regularMarketVolume") or 1)
+            avg=int(info.get("averageVolume") or 1)
+            vr=round(vol/avg,1) if avg else 1
+        except: pass
+    d={"regularMarketPrice":price,"regularMarketChangePercent":chg,
+       "fiftyTwoWeekHigh":hi52,"fiftyTwoWeekLow":lo52,"marketCap":mc,"volumeRatio":vr}
     news=get_stock_news(sym)
     if ANTHROPIC_KEY:
         try:

@@ -465,12 +465,12 @@ async function selectStock(ticker,mode){
   const pre=s.preMarketPrice||0,preChg=s.preMarketChangePercent||0;
   const post=s.postMarketPrice||0,postChg=s.postMarketChangePercent||0;
   const state=s.marketState||'CLOSED';
-  // Pre/post market badge
+  // Always show extended hours price when available
   let extHtml='';
-  if(state==='PRE'&&pre>0)extHtml=`<div class="ext-price ext-pre">Pre-Market $${pre.toFixed(2)} ${preChg>=0?'+':''}${preChg.toFixed(2)}%</div>`;
-  else if(state==='POST'&&post>0)extHtml=`<div class="ext-price ext-post">After-Hours $${post.toFixed(2)} ${postChg>=0?'+':''}${postChg.toFixed(2)}%</div>`;
-  else if(state==='CLOSED'&&post>0)extHtml=`<div class="ext-price ext-post">After-Hours $${post.toFixed(2)} ${postChg>=0?'+':''}${postChg.toFixed(2)}%</div>`;
-  else if(state==='CLOSED'&&pre>0)extHtml=`<div class="ext-price ext-pre">Pre-Market $${pre.toFixed(2)} ${preChg>=0?'+':''}${preChg.toFixed(2)}%</div>`;
+  if(post>0&&(state==='POST'||state==='POSTPOST'||state==='CLOSED'))
+    extHtml=`<div class="ext-price ext-post">After-Hours <strong>$${post.toFixed(2)}</strong> <span class="${postChg>=0?'cu':'cd'}">${postChg>=0?'+':''}${postChg.toFixed(2)}%</span></div>`;
+  else if(pre>0&&(state==='PRE'||state==='PREPRE'||state==='CLOSED'))
+    extHtml=`<div class="ext-price ext-pre">Pre-Market <strong>$${pre.toFixed(2)}</strong> <span class="${preChg>=0?'cu':'cd'}">${preChg>=0?'+':''}${preChg.toFixed(2)}%</span></div>`;
   const whyText=generateWhy(s);
   const newsHtml=newsItems.length?newsItems.map(n=>'<div class="news-hl"><span class="news-hl-dot">►</span><span>'+n.title+'</span></div>').join(''):'<div style="font-size:10px;color:var(--t3)">Loading headlines...</div>';
   const rangeHTML='<div class="range-row"><div class="rtabs">'+['1D','1W','1M','1Y','5Y'].map(r=>'<button class="rtab '+(currentRange===r?'ra':'')+'" onclick="setRange(\''+r+'\')">'+r+'</button>').join('')+'</div><span id="chart-spin" class="chart-upd" style="display:none">↻</span></div>';
@@ -519,10 +519,26 @@ async function getPrediction(ticker, timeframe){
   const result=document.getElementById('pred-result');
   if(result)result.innerHTML='<div class="spin" style="width:18px;height:18px;border-width:1.5px;margin:8px auto"></div>';
   try{
-    const d=await(await fetch('/predict?symbol='+ticker+'&timeframe='+timeframe)).json();
+    // Pass current stock data so server doesn't need to re-fetch (avoids $0 bug)
+    const allPP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)];
+    const sdata=allPP.find(x=>x.symbol===ticker)||{};
+    const pparams=new URLSearchParams({symbol:ticker,timeframe,
+      price:sdata.regularMarketPrice||0,chg:sdata.regularMarketChangePercent||0,
+      hi52:sdata.fiftyTwoWeekHigh||0,lo52:sdata.fiftyTwoWeekLow||0,
+      vr:sdata._vr||1,mc:sdata.marketCap||0});
+    const d=await(await fetch('/predict?'+pparams)).json();
     const tag=d.ai?'<div class="pred-ai-tag">✦ AI · Claude</div>':'<div class="pred-rule-tag">⚡ Technical Analysis</div>';
     const titles={'today':'📅 Today\'s Outlook','week':'📆 End-of-Week Outlook','year':'🗓️ Year-End Outlook'};
-    if(result)result.innerHTML=tag+'<strong style="font-size:11px;color:var(--text);display:block;margin-bottom:5px">'+titles[timeframe]+'</strong>'+d.prediction;
+    // Extract PRICE TARGET line if present
+    let predTxt=d.prediction||'';
+    let ptHtml='';
+    if(predTxt.startsWith('PRICE TARGET:')){
+      const ln=predTxt.split('\n');
+      const tgt=ln[0].replace('PRICE TARGET:','').trim();
+      predTxt=(ln.slice(2).join('\n')||ln.slice(1).join('\n')).trim();
+      ptHtml='<div style="background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.25);border-radius:6px;padding:10px 12px;margin-bottom:9px"><div style="font-size:8px;font-family:var(--mono);color:var(--t3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">🎯 Price Target</div><div style="font-size:20px;font-weight:700;font-family:var(--mono);color:var(--green)">'+tgt+'</div></div>';
+    }
+    if(result)result.innerHTML=tag+ptHtml+'<strong style="font-size:11px;color:var(--text);display:block;margin-bottom:5px">'+titles[timeframe]+'</strong>'+predTxt;
   }catch(e){
     if(result)result.innerHTML='<span style="color:var(--red);font-size:10px">Prediction failed — check connection</span>';
   }
@@ -620,9 +636,13 @@ async function refreshMarket(){
   try{
     const data=(await(await fetch('/market')).json()).result||[];
     data.forEach(q=>{
-      const sl=q.symbol.toLowerCase().replace('-',''),chg=q.change||0;
+      const sl=q.symbol==='BTC-USD'?'btc':q.symbol.toLowerCase(),chg=q.change||0;
       const pe=document.getElementById(sl+'-price'),ce=document.getElementById(sl+'-chg'),se=document.getElementById(sl+'-sig');
-      if(pe){pe.textContent=q.symbol==='BTC-USD'?'$'+fmtBig(q.price*1000)+' / $'+fmtBig(q.price):'$'+q.price.toFixed(2);pe.style.color=chg>=0?'var(--green)':'var(--red)';}
+      if(pe){
+        if(q.symbol==='BTC-USD') pe.textContent='$'+Number(q.price).toLocaleString('en-US',{maximumFractionDigits:0});
+        else pe.textContent='$'+q.price.toFixed(2);
+        pe.style.color=chg>=0?'var(--green)':'var(--red)';
+      }
       if(ce){ce.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';ce.className='chg '+(chg>=0?'cu':'cd');}
       if(se){const cls=chg>0.4?'mkt-bull':chg<-0.4?'mkt-bear':'mkt-flat';const lbl=chg>0.4?'📈 BULL':chg<-0.4?'📉 BEAR':'➡ FLAT';se.className='mkt-sig '+cls;se.textContent=lbl;}
     });
