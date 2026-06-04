@@ -12,7 +12,9 @@ except ImportError:
 
 app = Flask(__name__, static_folder='.')
 PORT = int(os.environ.get('PORT', 8765))
-ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+ANTHROPIC_KEY  = os.environ.get('ANTHROPIC_API_KEY', '')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT  = os.environ.get('TELEGRAM_CHAT_ID', '')
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
 VALID_PERIODS   = {'1d','5d','1mo','3mo','6mo','1y','2y','5y','10y','ytd','max'}
@@ -334,6 +336,14 @@ def predict():
         except Exception as e:
             print(f"  AI predict error: {e}")
     return cors({"prediction":get_rule_prediction(sym,d,tf),"ai":False})
+
+
+@app.route('/notify')
+def notify():
+    msg = request.args.get('msg','')
+    if msg:
+        send_telegram(msg)
+    return cors({"ok": True})
 
 if __name__=='__main__':
     print(f"\n  Options Scanner Pro — http://localhost:{PORT}\n")

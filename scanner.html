@@ -184,6 +184,12 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;displ
     <div class="logo-box"><svg viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/></svg></div>
     <div><div class="logo-text">Options Scanner Pro</div><div class="logo-sub">Abiy Kassa · St Louis MO</div></div>
   </div>
+  <!-- Ethiopian Flag -->
+  <div title="🇪🇹 Ethiopia" style="display:flex;flex-direction:column;width:32px;height:20px;border-radius:3px;overflow:hidden;box-shadow:0 0 0 1px rgba(255,255,255,.1);flex-shrink:0;margin-left:4px">
+    <div style="flex:1;background:#009A44"></div>
+    <div style="flex:1;background:#FCDD09"></div>
+    <div style="flex:1;background:#DD2033"></div>
+  </div>
   <div class="tr">
     <div class="tdisp" id="clk">—</div>
     <div class="tdisp" id="last-refresh" style="display:none"><div class="ref-dot" id="ref-dot"></div><span id="ref-txt">—</span></div>
@@ -582,6 +588,16 @@ async function doRefresh(){
     if(customStocks[q.symbol]){customStocks[q.symbol].regularMarketPrice=q.regularMarketPrice;customStocks[q.symbol].regularMarketChangePercent=q.regularMarketChangePercent;customStocks[q.symbol].regularMarketVolume=q.regularMarketVolume;}
   });
   updateTrades(quotes);
+  // Check entry zone for all scanned picks and alert via Telegram
+  const allTracked=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)];
+  allTracked.forEach(s=>{
+    if(atEntry(s)&&!s._tgEntryFired){
+      s._tgEntryFired=true;
+      const dir=s._mode==='puts'?'PUT':'CALL';
+      tgAlert(`🎯 ENTRY ZONE REACHED\n${s.symbol} — ${s.shortName||s.symbol}\n💰 Entry: $${s._entry} | Target: $${s._target} | Stop: $${s._stop}\n📈 ${dir} $${s._op?.strike} exp ${s._op?.expiryStr}\nPrice now: $${(s.regularMarketPrice||0).toFixed(2)}`);
+    }
+    if(!atEntry(s)) s._tgEntryFired=false; // reset when price moves away
+  });
   if(selMode==='custom')renderCustomSidebar();else if(selMode==='rocket')renderRocketSidebar();else renderSidebar();
   updateLivePrice();
   if(selTicker&&activeChart){
@@ -606,10 +622,10 @@ function updateTrades(quotes){
     const pnl=((price-t.entry)/t.entry*100).toFixed(2);
     trades[q.symbol].currentPrice=price;trades[q.symbol].pnl=pnl;trades[q.symbol].lastCheck=new Date().toLocaleTimeString();
     const prev=t.status;
-    if(price>=s._target&&s._mode!=='puts'){trades[q.symbol].status='sell-target';if(prev!=='sell-target')showAlert(q.symbol,'🎯 SELL — Target! $'+price.toFixed(2)+' P&L: +'+pnl+'%');}
-    else if(price<=s._target&&s._mode==='puts'){trades[q.symbol].status='sell-target';if(prev!=='sell-target')showAlert(q.symbol,'🎯 SELL PUT — Target! $'+price.toFixed(2)+' P&L: +'+pnl+'%');}
-    else if(price<=s._stop&&s._mode!=='puts'){trades[q.symbol].status='sell-stop';if(prev!=='sell-stop')showAlert(q.symbol,'🛑 SELL — Stop! $'+price.toFixed(2)+' P&L: '+pnl+'%');}
-    else if(price>=s._stop&&s._mode==='puts'){trades[q.symbol].status='sell-stop';if(prev!=='sell-stop')showAlert(q.symbol,'🛑 SELL PUT — Stop! $'+price.toFixed(2)+' P&L: '+pnl+'%');}
+    if(price>=s._target&&s._mode!=='puts'){trades[q.symbol].status='sell-target';if(prev!=='sell-target'){showAlert(q.symbol,'🎯 SELL — Target! $'+price.toFixed(2)+' P&L: +'+pnl+'%');tgAlert('💰 TARGET REACHED — '+q.symbol+'\nPrice: $'+price.toFixed(2)+' | Entry was: $'+t.entry+'\nP&L: +'+pnl+'%\n✅ TAKE PROFIT — target hit');}}
+    else if(price<=s._target&&s._mode==='puts'){trades[q.symbol].status='sell-target';if(prev!=='sell-target'){showAlert(q.symbol,'🎯 SELL PUT — Target! $'+price.toFixed(2)+' P&L: +'+pnl+'%');tgAlert('💰 PUT TARGET HIT — '+q.symbol+'\nPrice: $'+price.toFixed(2)+' | Entry: $'+t.entry+'\nP&L: +'+pnl+'%\n✅ TAKE PROFIT on PUT');}}
+    else if(price<=s._stop&&s._mode!=='puts'){trades[q.symbol].status='sell-stop';if(prev!=='sell-stop'){showAlert(q.symbol,'🛑 SELL — Stop! $'+price.toFixed(2)+' P&L: '+pnl+'%');tgAlert('🛑 STOP HIT — '+q.symbol+'\nPrice: $'+price.toFixed(2)+' | Entry was: $'+t.entry+'\nP&L: '+pnl+'%\n⚠️ EXIT NOW — stop loss triggered');}}
+    else if(price>=s._stop&&s._mode==='puts'){trades[q.symbol].status='sell-stop';if(prev!=='sell-stop'){showAlert(q.symbol,'🛑 SELL PUT — Stop! $'+price.toFixed(2)+' P&L: '+pnl+'%');tgAlert('🛑 PUT STOP HIT — '+q.symbol+'\nPrice: $'+price.toFixed(2)+' | Entry: $'+t.entry+'\nP&L: '+pnl+'%\n⚠️ EXIT PUT — stop triggered');}}
     else trades[q.symbol].status='hold';
   });
   if(selTicker&&trades[selTicker]){const el=document.getElementById('sig-outer'),allP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)],s=allP.find(x=>x.symbol===selTicker);if(el&&s)el.innerHTML=buildSig(selTicker,s,trades[selTicker]);}
@@ -667,6 +683,12 @@ function showAlert(ticker,msg){document.getElementById('atitle').textContent=tic
 function genFake(cur,n){const a=[];let p=cur*0.9;for(let i=0;i<n;i++){p+=(Math.random()-.45)*p*.02;a.push(+p.toFixed(2));}a[a.length-1]=cur;return a;}
 function makeDates(n){return Array.from({length:n},(_,i)=>{const d=new Date();d.setDate(d.getDate()-n+1+i);return d.toLocaleDateString('en-US',{month:'short',day:'numeric'});});}
 function fmtBig(n){if(n>=1e12)return(n/1e12).toFixed(1)+'T';if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(0)+'M';return n.toFixed(0);}
+
+
+// ─── TELEGRAM ALERTS ───
+async function tgAlert(msg){
+  try{ await fetch('/notify?msg='+encodeURIComponent(msg)); }catch(e){}
+}
 
 // ─── CLOCK ───
 function tick(){
