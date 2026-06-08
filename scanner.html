@@ -442,6 +442,35 @@ async function runSqueezeScan(){
   if(btn){btn.disabled=false;btn.textContent='🔄 Rescan Squeeze';}
 }
 
+
+// ─── WEEKLY SIGNAL ───────────────────────────────────────────────────
+function weekSignal(s){
+  const chg=s.regularMarketChangePercent||0;
+  const vr=s._vr||1;
+  const p=s.regularMarketPrice||0;
+  const hi=s.fiftyTwoWeekHigh||p,lo=s.fiftyTwoWeekLow||p*0.7;
+  const rng=(p-lo)/((hi-lo)||1);
+  const pre=s.preMarketPrice||0;
+  let bull=0,bear=0;
+  if(chg>4)bull+=4;else if(chg>2)bull+=3;else if(chg>1)bull+=2;else if(chg>0)bull+=1;
+  else if(chg<-4)bear+=4;else if(chg<-2)bear+=3;else if(chg<-1)bear+=2;else if(chg<0)bear+=1;
+  if(vr>2&&chg>0)bull+=2;else if(vr>2&&chg<0)bear+=2;else if(vr>1.5)bull+=1;
+  if(rng>0.80)bull+=3;else if(rng>0.60)bull+=2;else if(rng>0.40)bull+=1;
+  else if(rng<0.20)bear+=3;else if(rng<0.40)bear+=2;
+  if(pre>0&&pre>p*1.01)bull+=2;else if(pre>0&&pre<p*0.99)bear+=2;
+  const d=bull-bear;
+  if(d>=4)return{label:'📈 BULL WEEK',short:'📈 BULL',color:'var(--green)',bg:'rgba(52,211,153,.1)',border:'rgba(52,211,153,.3)'};
+  if(d<=-4)return{label:'📉 BEAR WEEK',short:'📉 BEAR',color:'var(--red)',bg:'rgba(248,113,113,.08)',border:'rgba(248,113,113,.3)'};
+  return{label:'➡ HOLD WEEK',short:'➡ HOLD',color:'var(--amber)',bg:'rgba(251,191,36,.08)',border:'rgba(251,191,36,.25)'};
+}
+function wkBadgeHtml(s){
+  var w=weekSignal(s);
+  return '<div style="display:inline-flex;align-items:center;background:'+w.bg+';border:1px solid '+w.border+';border-radius:3px;padding:2px 6px;font-size:8px;font-family:var(--mono);font-weight:600;color:'+w.color+';margin-bottom:3px">'+w.short+'</div>';
+}
+function wkBannerHtml(s){
+  var w=weekSignal(s);
+  return '<div style="display:inline-flex;align-items:center;gap:6px;background:'+w.bg+';border:1px solid '+w.border+';border-radius:5px;padding:5px 12px;font-size:11px;font-family:var(--mono);font-weight:700;color:'+w.color+';margin-bottom:8px">'+w.label+'</div>';
+}
 // ─── MAIN SCAN ───
 async function runScan(){
   const btn=document.getElementById('scanBtn');btn.disabled=true;
@@ -514,10 +543,12 @@ function renderSidebar(){
   document.getElementById('slist').innerHTML=picks.map((s,i)=>{
     const ae=atEntry(s);
     const flashBadge=ae?(isPuts?'<span class="put-badge">▼ PUT ENTRY</span>':'<span class="entry-badge">▲ ENTRY</span>'):'';
+    const wkb=wkBadgeHtml(s);
     return '<div class="sitem '+(selTicker===s.symbol&&selMode===s._mode?'active '+(isPuts?'put-active':''):'')+' '+(trades[s.symbol]?'intrade':'')+' '+(ae?'at-entry':'')+'" onclick="selectStock(\''+s.symbol+'\',\''+s._mode+'\')" id="si-'+s.symbol+'">'+
       '<div class="srow1"><span class="stk">'+s.symbol+flashBadge+'</span><span class="rnum">'+(isPuts?'<span style="color:var(--red)">#':'#')+(i+1)+(isPuts?'</span>':'')+'</span></div>'+
       '<div class="sname">'+(s.shortName||s.symbol)+'</div>'+
       '<div class="sprow"><span class="sp">$'+(s.regularMarketPrice||0).toFixed(2)+'</span><span class="chg '+((s.regularMarketChangePercent||0)>=0?'cu':'cd')+'">'+(s.regularMarketChangePercent||0 >=0?'+':'')+(s.regularMarketChangePercent||0).toFixed(2)+'%</span></div>'+
+      wkb+
       '<div class="swrap"><div class="stop2"><span>Score</span><span>'+s._score+'/100</span></div><div class="sbar"><div class="sfill '+(isPuts?'sfill-put':isUF?'sfill-un':'sfill-sp')+'" style="width:'+s._score+'%"></div></div></div>'+
       '<div class="tags"><span class="tag '+(isPuts?'tput':'tbuy')+'">'+( isPuts?'PUT PLAY':'CALL PLAY')+'</span>'+
       (isPuts?'<span class="tag tput">SHORT</span>':isUF?'<span class="tag tflow">⚡FLOW</span>':'<span class="tag tcall">CALL</span>')+'</div>'+
@@ -571,6 +602,7 @@ function renderSqueezeSidebar(){
     html+='<span style="color:var(--t3)">Short: <span style="color:'+shortColor+'">'+shortStr+'</span></span></div>';
     html+='<div class="swrap"><div class="stop2"><span>Squeeze Score</span><span>'+score+'/100</span></div>';
     html+='<div class="sbar"><div class="sfill" style="width:'+score+'%;background:linear-gradient(90deg,var(--amber),var(--red))"></div></div></div>';
+    html+=wkBadgeHtml(s);
     html+='<div class="tags"><span class="tag" style="background:rgba(251,191,36,.1);color:var(--amber);border-color:rgba(251,191,36,.25)">&#127919; SQUEEZE</span>';
     if(s._shortPct>20) html+='<span class="tag" style="background:rgba(248,113,113,.1);color:var(--red);border-color:rgba(248,113,113,.25)">HIGH SHORT</span>';
     html+='</div>';
@@ -584,7 +616,7 @@ function renderCustomSidebar(){
   const syms=Object.keys(customStocks);
   document.getElementById('scnt').textContent=syms.length?syms.length+' looked up':'—';
   if(!syms.length){document.getElementById('slist').innerHTML='<div style="padding:14px;text-align:center;color:var(--t3);font-size:10px;line-height:1.9">Type a ticker above</div>';return;}
-  document.getElementById('slist').innerHTML=syms.map(sym=>{const s=customStocks[sym];return '<div class="sitem '+(selTicker===sym&&selMode==='custom'?'active':'')+' '+(trades[sym]?'intrade':'')+'" onclick="selectStock(\''+sym+'\',\'custom\')"><div class="srow1"><span class="stk">'+sym+'</span></div><div class="sname">'+(s.shortName||sym)+'</div><div class="sprow"><span class="sp">$'+(s.regularMarketPrice||0).toFixed(2)+'</span><span class="chg '+((s.regularMarketChangePercent||0)>=0?'cu':'cd')+'">'+(s.regularMarketChangePercent||0 >=0?'+':'')+(s.regularMarketChangePercent||0).toFixed(2)+'%</span></div>'+tpill(sym)+'</div>';}).join('');
+  document.getElementById('slist').innerHTML=syms.map(sym=>{const s=customStocks[sym];return '<div class="sitem '+(selTicker===sym&&selMode==='custom'?'active':'')+' '+(trades[sym]?'intrade':'')+'" onclick="selectStock(\''+sym+'\',\'custom\')"><div class="srow1"><span class="stk">'+sym+'</span></div><div class="sname">'+(s.shortName||sym)+'</div><div class="sprow"><span class="sp">$'+(s.regularMarketPrice||0).toFixed(2)+'</span><span class="chg '+((s.regularMarketChangePercent||0)>=0?'cu':'cd')+'">'+(s.regularMarketChangePercent||0 >=0?'+':'')+(s.regularMarketChangePercent||0).toFixed(2)+'%</span></div>'+wkBadgeHtml(customStocks[sym]||{})+tpill(sym)+'</div>';}).join('');
 }
 
 // ─── CHART PLUGINS ───
@@ -665,8 +697,28 @@ async function selectStock(ticker,mode){
     '<div class="li"><div class="ld" style="background:'+(isPuts?'var(--red)':'var(--green)')+'"></div>'+z1lbl+'</div>'+
     '<div class="li"><div class="ld" style="background:'+(isPuts?'var(--green)':'var(--red)')+'"></div>'+z2lbl+'</div>'+
     '<div class="li"><div class="ld" style="background:var(--amber)"></div>'+z3lbl+'</div></div>'+
+    wkBannerHtml(s)+
     '<div class="zones"><div class="zone '+(isPuts?'zst':'ze')+'"><div class="zlbl">'+z1lbl+'</div><div class="zval">$'+s._entry+'</div></div><div class="zone '+(isPuts?'ze':'zs')+'"><div class="zlbl">'+z2lbl+'</div><div class="zval">$'+s._target+'</div></div><div class="zone '+(isPuts?'zs':'zst')+'"><div class="zlbl">'+z3lbl+'</div><div class="zval">$'+s._stop+'</div></div></div>'+
-    '<div class="ogrid"><div class="ocard"><div class="olbl">Option Type</div><div class="oval '+(isPuts?'or':'og')+'">'+op.type+'</div></div><div class="ocard"><div class="olbl">Strike</div><div class="oval ob">$'+op.strike+'</div></div><div class="ocard"><div class="olbl">Expiry</div><div class="oval">'+op.expiryStr+'</div></div><div class="ocard"><div class="olbl">DTE</div><div class="oval oa">'+op.dte+' days</div></div><div class="ocard"><div class="olbl">Est Premium</div><div class="oval">$'+op.prem+'</div></div><div class="ocard"><div class="olbl">Vol/Avg</div><div class="oval '+(isUF||isRocket?'op':isPuts?'or':'og')+'">'+s._vr+'x</div></div></div>'+
+    (isSqueeze?
+    // STOCK TRADE PANEL for squeeze
+    '<div class="ogrid">'+
+    '<div class="ocard" style="border-color:rgba(52,211,153,.25)"><div class="olbl">&#9650; Buy Entry</div><div class="oval og">$'+s._entry+'</div></div>'+
+    '<div class="ocard" style="border-color:rgba(248,113,113,.25)"><div class="olbl">&#9654; Sell Target</div><div class="oval or">$'+s._target+'</div></div>'+
+    '<div class="ocard" style="border-color:rgba(251,191,36,.25)"><div class="olbl">&#9632; Stop Loss</div><div class="oval oa">$'+s._stop+'</div></div>'+
+    '<div class="ocard"><div class="olbl">Upside Potential</div><div class="oval og">+25%</div></div>'+
+    '<div class="ocard"><div class="olbl">Max Risk</div><div class="oval or">-8%</div></div>'+
+    '<div class="ocard"><div class="olbl">Risk/Reward</div><div class="oval ob">1 : 3.1</div></div>'+
+    '</div>'+
+    '<div style="background:rgba(52,211,153,.05);border:1px solid rgba(52,211,153,.2);border-radius:7px;padding:11px 13px;margin-bottom:10px">'+
+    '<div style="font-size:11px;font-weight:600;color:var(--green);margin-bottom:6px">&#9650; STOCK TRADE — How to use:</div>'+
+    '<div style="font-size:10px;color:var(--t2);font-family:var(--mono);line-height:1.9">'+
+    '1. Buy shares when price is near <strong style="color:var(--green)">$'+s._entry+'</strong> (entry zone)<br>'+
+    '2. Check <strong>Check the box below</strong> below — app auto-tracks &amp; alerts you<br>'+
+    '3. Sell at <strong style="color:var(--red)">$'+s._target+'</strong> target or if it drops to <strong style="color:var(--amber)">$'+s._stop+'</strong> stop<br>'+
+    '4. You can buy back if it bounces off support with fresh volume'+
+    '</div></div>'
+    :
+    '<div class="ogrid"><div class="ocard"><div class="olbl">Option Type</div><div class="oval '+(isPuts?'or':'og')+'">'+op.type+'</div></div><div class="ocard"><div class="olbl">Strike</div><div class="oval ob">$'+op.strike+'</div></div><div class="ocard"><div class="olbl">Expiry</div><div class="oval">'+op.expiryStr+'</div></div><div class="ocard"><div class="olbl">DTE</div><div class="oval oa">'+op.dte+' days</div></div><div class="ocard"><div class="olbl">Est Premium</div><div class="oval">$'+op.prem+'</div></div><div class="ocard"><div class="olbl">Vol/Avg</div><div class="oval '+(isUF||isRocket?'op':isPuts?'or':'og')+'">'+s._vr+'x</div></div></div>')+
     '<div class="ogrid"><div class="ocard"><div class="olbl">Market Cap</div><div class="oval">'+(s.marketCap?'$'+fmtBig(s.marketCap):'—')+'</div></div><div class="ocard"><div class="olbl">52-Wk High</div><div class="oval">$'+(s.fiftyTwoWeekHigh||0).toFixed(2)+'</div></div><div class="ocard"><div class="olbl">52-Wk Low</div><div class="oval">$'+(s.fiftyTwoWeekLow||0).toFixed(2)+'</div></div></div>'+
     (isSqueeze?'<div class="ogrid"><div class="ocard"><div class="olbl">Float Shares</div><div class="oval" style="color:var(--amber)">'+fmtFloat(s._floatSh||0)+'</div></div><div class="ocard"><div class="olbl">Short % Float</div><div class="oval" style="color:'+(( s._shortPct||0)>20?'var(--red)':'var(--amber)')+'">'+((s._shortPct||0).toFixed(1))+'%</div></div><div class="ocard"><div class="olbl">Days to Cover</div><div class="oval oa">'+((s._shortRatio||0).toFixed(1))+' days</div></div></div><div style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:7px;padding:10px 13px;margin-bottom:10px;font-size:11px"><strong style="color:var(--amber)">⚠️ Squeeze Play Rules:</strong><br><span style="color:var(--t2)">1. Enter only after 9:40 AM when volume confirms<br>2. Never hold through lunch (11:30–1:30 PM)<br>3. Take 50% off at +15%, let rest run to target<br>4. Honor the -8% stop — these reverse fast</span></div>':'')+''+
     '<div class="why-box"><div class="why-hdr"><span class="why-title">📰 Why '+ticker+' is moving</span><span class="'+(chg>=0?'why-up':'why-dn')+'">'+(chg>=0?'▲ UP':'▼ DOWN')+' '+Math.abs(chg).toFixed(2)+'%</span></div><div class="why-analysis">'+whyText+'</div><div class="why-news"><div class="why-news-ttl">Latest Headlines</div>'+newsHtml+'</div></div>'+
@@ -725,9 +777,10 @@ async function getPrediction(ticker, timeframe){
 // ─── TRADE SIGNAL ───
 function buildSig(ticker,s,t){
   const pnl=parseFloat(t.pnl||0),ps=(pnl>=0?'+':'')+pnl.toFixed(2)+'%',cur=(t.currentPrice||t.entry).toFixed(2),chk=t.lastCheck||'—';
-  if(t.status==='sell-stop')return '<div class="sig-bar sig-sell-stop"><div class="sig-top"><span class="sig-lbl blink-bad">🛑 SELL</span><span class="sig-sub">STOP HIT — EXIT NOW</span><span class="sig-pnl" style="color:var(--red)">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:var(--red)">$'+cur+'</strong> · Stop $'+s._stop+' breached</div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
-  if(t.status==='sell-target')return '<div class="sig-bar sig-sell-profit"><div class="sig-top"><span class="sig-lbl blink-good">🎯 SELL</span><span class="sig-sub">TARGET REACHED — TAKE PROFIT</span><span class="sig-pnl" style="color:var(--green)">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:var(--green)">$'+cur+'</strong> · Target $'+s._target+' ✓</div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
-  return '<div class="sig-bar sig-hold"><div class="sig-top"><span class="sig-lbl" style="color:var(--green)">✓ HOLD</span><span class="sig-sub">POSITION IN RANGE</span><span class="sig-pnl" style="color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:'+(pnl>=0?'var(--green)':'var(--amber)')+'">$'+cur+'</strong> · <span style="color:var(--green)">Target $'+s._target+'</span> · <span style="color:var(--amber)">Stop $'+s._stop+'</span></div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
+  if(t.status==='sell-stop')return '<div class="sig-bar sig-sell-stop"><div class="sig-top"><span class="sig-lbl blink-bad">🛑 SELL</span><span class="sig-sub">'+(t.mode==='squeeze'?'STOP HIT — SELL SHARES NOW':'STOP HIT — EXIT NOW')+'</span><span class="sig-pnl" style="color:var(--red)">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:var(--red)">$'+cur+'</strong> · Stop $'+s._stop+' breached</div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
+  if(t.status==='sell-target')return '<div class="sig-bar sig-sell-profit"><div class="sig-top"><span class="sig-lbl blink-good">🎯 SELL</span><span class="sig-sub">'+(t.mode==='squeeze'?'TARGET HIT — SELL SHARES':'TARGET REACHED — TAKE PROFIT')+'</span><span class="sig-pnl" style="color:var(--green)">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:var(--green)">$'+cur+'</strong> · Target $'+s._target+' ✓</div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
+  var tradeType=t.mode==='squeeze'?'STOCK':'OPTION';
+  return '<div class="sig-bar sig-hold"><div class="sig-top"><span class="sig-lbl" style="color:var(--green)">✓ HOLD</span><span class="sig-sub">'+(t.mode==='squeeze'?'HOLDING STOCK — IN RANGE':'OPTION IN RANGE')+'</span><span class="sig-pnl" style="color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+ps+'</span></div><div class="sig-det">Entry $'+t.entry+' · Now <strong style="color:'+(pnl>=0?'var(--green)':'var(--amber)')+'">$'+cur+'</strong> · <span style="color:var(--green)">Target $'+s._target+'</span> · <span style="color:var(--amber)">Stop $'+s._stop+'</span></div><div class="sig-upd">● Live · last check '+chk+' · every 30 sec</div></div>';
 }
 
 // ─── TRADE TRACKING ───
@@ -860,14 +913,15 @@ function fmtBig(n){if(n>=1e12)return(n/1e12).toFixed(1)+'T';if(n>=1e9)return(n/1
 async function testTelegram(){
   const btn=event.target;btn.textContent='Sending...';btn.disabled=true;
   try{
-    const r=await fetch('/test-telegram');
+    const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),25000);
+    const r=await fetch('/test-telegram',{signal:ctrl.signal});clearTimeout(tid);
     const d=await r.json();
     btn.textContent='🔔 Sent!';
     setTimeout(()=>{btn.textContent='🔔 Test';btn.disabled=false;},3000);
     showAlert('Telegram','Check your Telegram — test message sent!');
   }catch(e){
-    btn.textContent='🔔 Failed';btn.disabled=false;
-    showAlert('Telegram','Failed — check server is running');
+    btn.textContent='🔔 Retry';btn.disabled=false;
+    showAlert('Telegram','Server may be waking up (30 sec) — try again');
   }
 }
 // ─── TELEGRAM ALERTS ───
