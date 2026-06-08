@@ -913,15 +913,20 @@ function fmtBig(n){if(n>=1e12)return(n/1e12).toFixed(1)+'T';if(n>=1e9)return(n/1
 async function testTelegram(){
   const btn=event.target;btn.textContent='Sending...';btn.disabled=true;
   try{
-    const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),25000);
+    const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),30000);
     const r=await fetch('/test-telegram',{signal:ctrl.signal});clearTimeout(tid);
     const d=await r.json();
-    btn.textContent='🔔 Sent!';
-    setTimeout(()=>{btn.textContent='🔔 Test';btn.disabled=false;},3000);
-    showAlert('Telegram','Check your Telegram — test message sent!');
+    if(d.ok){
+      btn.textContent='🔔 ✅ Sent!';
+      setTimeout(()=>{btn.textContent='🔔 Test';btn.disabled=false;},4000);
+      showAlert('Telegram','✅ '+d.msg);
+    } else {
+      btn.textContent='🔔 ❌ Failed';btn.disabled=false;
+      showAlert('Telegram','❌ '+d.msg);
+    }
   }catch(e){
     btn.textContent='🔔 Retry';btn.disabled=false;
-    showAlert('Telegram','Server may be waking up (30 sec) — try again');
+    showAlert('Telegram','Request timed out — server waking up, try again in 30 sec');
   }
 }
 // ─── TELEGRAM ALERTS ───

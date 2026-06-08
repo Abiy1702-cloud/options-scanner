@@ -271,6 +271,37 @@ def get_ai_prediction(symbol, d, news, timeframe):
     with urllib.request.urlopen(req,timeout=20) as resp:
         return json.loads(resp.read())['content'][0]['text']
 
+
+# ── TELEGRAM ──────────────────────────────────────────────────────────
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        print("  Telegram: env vars not set")
+        return False
+    try:
+        url  = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+        body = json.dumps({
+            'chat_id': str(TELEGRAM_CHAT).strip(),
+            'text':    str(msg),
+            'disable_web_page_preview': True
+        }).encode()
+        req = urllib.request.Request(
+            url, data=body,
+            headers={'Content-Type':'application/json','User-Agent':UA}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('ok'):
+                print("  Telegram sent OK")
+                return True
+            print(f"  Telegram API error: {result.get('description','unknown')}")
+            return False
+    except urllib.error.HTTPError as e:
+        print(f"  Telegram HTTP {e.code}: {e.read().decode()[:200]}")
+        return False
+    except Exception as e:
+        print(f"  Telegram {type(e).__name__}: {e}")
+        return False
+
 # ── FLASK ROUTES ───────────────────────────────────────────────────────
 @app.route('/')
 def index(): return send_from_directory('.','scanner.html')
@@ -351,15 +382,34 @@ def predict():
 
 @app.route('/test-telegram')
 def test_telegram():
-    send_telegram('✅ Options Scanner Pro — Telegram connected!\n\n🇪🇹 Abiy Kassa · St Louis MO\nNotifications are working. You will receive alerts for:\n🎯 Entry zone reached\n💰 Target hit — take profit\n🛑 Stop hit — exit now')
-    return cors({"ok": True, "msg": "Test sent — check your Telegram"})
+    msg = (
+        "✅ *Options Scanner Pro — Telegram Working!*\n\n"
+        "🇪🇹 Abiy Kassa · St Louis MO\n\n"
+        "You will receive alerts for:\n"
+        "🎯 Entry zone reached\n"
+        "💰 Target hit — take profit\n"
+        "🛑 Stop hit — exit now\n\n"
+        "_Token: ..."+TELEGRAM_TOKEN[-8:]+"_"
+    )
+    ok = send_telegram(msg)
+    if ok:
+        return cors({"ok": True,  "msg": "✅ Sent! Check your Telegram now"})
+    else:
+        # Try plain text fallback
+        ok2 = send_telegram("Options Scanner Pro - Telegram test. If you see this it works!")
+        if ok2:
+            return cors({"ok": True, "msg": "✅ Sent (plain text)! Check Telegram"})
+        token_preview = TELEGRAM_TOKEN[:10]+"..." if TELEGRAM_TOKEN else "NOT SET"
+        chat_preview  = str(TELEGRAM_CHAT)[:6]+"..." if TELEGRAM_CHAT else "NOT SET"
+        return cors({"ok": False, "msg": f"❌ Failed. Token: {token_preview} Chat: {chat_preview}. Make sure you pressed START on your bot."})
 
 @app.route('/notify')
 def notify():
     msg = request.args.get('msg','')
+    ok = False
     if msg:
-        send_telegram(msg)
-    return cors({"ok": True})
+        ok = send_telegram(msg)
+    return cors({"ok": ok})
 
 if __name__=='__main__':
     print(f"\n  Options Scanner Pro — http://localhost:{PORT}\n")
