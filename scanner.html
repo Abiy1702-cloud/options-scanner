@@ -194,6 +194,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;displ
     <div class="tdisp" id="clk">—</div>
     <div class="tdisp" id="last-refresh" style="display:none"><div class="ref-dot" id="ref-dot"></div><span id="ref-txt">—</span></div>
     <div class="mbadge mp" id="mbadge"><span class="ldot" id="ldot"></span><span id="mlbl">Loading</span></div>
+    <button onclick="testTelegram()" title="Test Telegram notification" style="background:var(--bg3);border:1px solid var(--border2);color:var(--t2);border-radius:5px;padding:6px 10px;font-size:11px;cursor:pointer">🔔 Test</button>
     <button class="sbtn" id="scanBtn" onclick="runScan()">▶ Scan Morning Picks</button>
   </div>
 </div>
@@ -204,6 +205,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;displ
   <button class="mode-tab" id="tab-uf"            onclick="switchMode('uf',this)">⚡ Flow <span class="mode-badge" id="badge-uf">—</span></button>
   <button class="mode-tab" id="tab-rocket"        onclick="switchMode('rocket',this)">🚀 Rockets <span class="mode-badge" id="badge-rocket">—</span></button>
   <button class="mode-tab" id="tab-custom"        onclick="switchMode('custom',this)">🔍 Custom <span class="mode-badge" id="badge-custom">NEW</span></button>
+  <button class="mode-tab" id="tab-squeeze"      onclick="switchMode('squeeze',this)">🎯 Squeeze <span class="mode-badge" id="badge-squeeze">—</span></button>
 </div>
 <!-- LAYOUT -->
 <div class="layout">
@@ -247,12 +249,75 @@ const UNUSUAL_LIST=['SPY','QQQ','COIN','MSTR','RIVN','LCID','GME','AMC','SOFI','
 const ROCKET_LIST=['NVDA','TSLA','MSTR','COIN','PLTR','RKLB','IONQ','ACHR','HOOD','SOFI','UPST','AFRM','APP','DUOL','DKNG','RDDT','RBLX','AI','CELH','ARM','AMD','SMCI','MU','META','GOOGL','AMZN','MSFT','HIMS','GRAB','LYFT','MARA','RIOT','SQ','PYPL','SHOP','SNAP','PINS','ABNB','NFLX','CRWD'];
 const PUTS_LIST=['NVDA','TSLA','AAPL','MSFT','META','AMZN','GOOGL','AVGO','NFLX','SMCI','AMD','COIN','PLTR','ARM','CRM','NOW','PANW','CRWD','SNOW','SHOP','MSTR','HOOD','SOFI','UPST','RKLB','GME','AMC','RIVN','LCID','SOUN'];
 
+// Low Float Short Squeeze candidates
+const SQUEEZE_LIST=[
+  // From real Telegram watchlists — known low-float plays
+  'DEVS','SDOT','LASE','CMND','SPCE','STI',
+  // Crypto miners (low float, high volatility)
+  'HUT','MARA','RIOT','CIFR','BTBT','IREN','CLSK',
+  // EV / speculative
+  'NKLA','GOEV','WKHS','FSR','MULN','FFIE',
+  'LCID','RIVN','PTRA',
+  // Biotech / pharma (high short interest)
+  'OCGN','VXRT','SIGA','TLRY','CGC','CRON',
+  'ATHX','ITRM','CTXR','BFRI',
+  // Meme / retail favorites
+  'GME','AMC','KOSS','BBBY','CLOV',
+  // Small cap tech
+  'SOUN','BBAI','ATER','IRNT','GFAI','DPRO',
+  'BKKT','WRAP','WISA','ILUS',
+  // Space / defense
+  'LUNR','RKLB','ACHR','JOBY','LILM',
+  // Other known squeeze plays
+  'HOOD','SOFI','OPEN','WISH','OPAD','SPRT'
+];
+
+function squeezeScore(q){
+  const price=q.regularMarketPrice||0,mc=q.marketCap||0;
+  // Exclude: above $40 (hard to squeeze), below $0.30 (too risky), mc > $1B
+  if(price<0.30||price>40||mc>1e9) return 0;
+  let s=50;
+  const chg=q.regularMarketChangePercent||0;
+  const vr=(q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1);
+  const shortPct=q.shortPercentOfFloat||0; // already in % from server
+  const floatSh=q.floatShares||0;
+  const shortRatio=q.shortRatio||0;
+
+  // ── SHORT INTEREST (0-30 pts) — KEY squeeze fuel ──
+  if(shortPct>40)s+=30; else if(shortPct>25)s+=23; else if(shortPct>15)s+=16; else if(shortPct>8)s+=9; else if(shortPct>3)s+=4;
+
+  // ── FLOAT SIZE (0-25 pts) — smaller = bigger squeeze ──
+  if(floatSh>0){
+    if(floatSh<2e6)s+=25;       // ultra low float <2M
+    else if(floatSh<5e6)s+=20;  // very low <5M
+    else if(floatSh<10e6)s+=14; // low <10M
+    else if(floatSh<20e6)s+=8;  // moderate <20M
+    else if(floatSh<50e6)s+=3;
+    else s-=8;                   // high float = weak squeeze
+  }
+
+  // ── VOLUME SPIKE (0-20 pts) — confirms momentum ──
+  if(vr>15)s+=20; else if(vr>8)s+=15; else if(vr>5)s+=10; else if(vr>3)s+=6; else if(vr>2)s+=3; else s-=8;
+
+  // ── PRICE MOMENTUM (0-15 pts) ──
+  if(chg>15)s+=15; else if(chg>8)s+=11; else if(chg>4)s+=7; else if(chg>1)s+=3; else if(chg<-5)s-=10;
+
+  // ── SHORT RATIO (days to cover) bonus ──
+  if(shortRatio>5)s+=8; else if(shortRatio>3)s+=4;
+
+  // ── PRICE SWEET SPOT ($1-$15) — best for day trading squeezes ──
+  if(price>=1&&price<=15)s+=5;
+
+  return Math.min(99,Math.max(0,Math.round(s)));
+}
+function fmtFloat(n){if(!n||n===0)return '—';if(n<1e6)return (n/1e3).toFixed(0)+'K';if(n<1e9)return (n/1e6).toFixed(1)+'M';return (n/1e9).toFixed(1)+'B';}
+
 const SP_META={MU:{dte:25,r:'Memory chip AI demand surging; DRAM cycle recovery confirmed; institutional accumulation detected.'},NVDA:{dte:32,r:'AI infrastructure leader; data center revenue compounding; technically above all key moving averages.'},AMD:{dte:25,r:'MI300X gaining market share vs NVDA; data center revenue inflecting; approaching key breakout level.'},SMCI:{dte:46,r:'AI server rack buildout beneficiary; NVDA ecosystem play; wait for pullback to entry before opening.'},TSLA:{dte:32,r:'EV delivery recovery + FSD progress + robotics optionality; high IV — debit spread preferred over naked call.'},META:{dte:25,r:'AI ad-targeting driving revenue beats; Reality Labs spending declining; buyback supports floor.'},GOOGL:{dte:25,r:'Gemini AI monetizing; YouTube ad growth strong; cloud winning large enterprise contracts.'},MSFT:{dte:32,r:'Azure AI workloads compounding; Copilot enterprise penetration early innings; consistent earnings upside.'},AAPL:{dte:25,r:'Services margin expansion; AI features driving upgrade cycle; India manufacturing reduces geopolitical risk.'},AMZN:{dte:32,r:'AWS AI workloads accelerating; retail margin at multi-year highs; advertising unit growing 25%+.'},AVGO:{dte:25,r:'Custom AI XPU chips for hyperscalers; VMware integration on track; most underappreciated AI play.'},QCOM:{dte:25,r:'AI PC Snapdragon wins; automotive revenue diversifying; handset inventory correction ending.'},CRM:{dte:25,r:'Agentforce AI converting trials to paid contracts; installed base upsell opportunity massive.'},NOW:{dte:32,r:'AI workflow automation leader; govt contracts accelerating; best-in-class net revenue retention of 125%+.'},ADBE:{dte:25,r:'Firefly AI monetizing creative workflows; Creative Cloud moat intact; reasonable valuation post-correction.'},PANW:{dte:25,r:'Platformization consolidating 5+ point solutions into 1; cybersecurity budget resilient to macro.'},CRWD:{dte:32,r:'CrowdStrike recovery complete; Falcon AI modules expanding ARPU; endpoint market share #1.'},TXN:{dte:32,r:'Industrial analog bottoming confirmed by distributor data; automotive cycle recovering in H2.'},ORCL:{dte:32,r:'AI database workloads driving cloud revenue; multi-cloud strategy winning; government contracts large.'},INTC:{dte:25,r:'Foundry turnaround optionality at depressed valuation; downside limited; catalyst: 18A node success.'},NFLX:{dte:25,r:'Ad tier scaling to 40M+ users; password crackdown complete; live sports expanding TAM.'},UBER:{dte:25,r:'AV fleet monetization narrative; core profitability proven; international expansion continues.'},COIN:{dte:14,r:'Bitcoin ETF flows correlated; regulatory clarity improving under new administration; best crypto proxy.'},PLTR:{dte:32,r:'AIP enterprise contracts compounding; US gov AI spending going through PLTR; best AI platform score.'},ARM:{dte:25,r:'AI chip IP royalty on every compute device; data center royalty rate rising; smartphone recovery.'},SNOW:{dte:32,r:'AI data cloud migration; Cortex AI developer platform early adoption; large enterprise upsell.'},ZS:{dte:25,r:'Zero-trust network security leader; platform consolidation deals getting larger; ARR accelerating.'},DDOG:{dte:25,r:'AI observability/monitoring growing with cloud workloads; net revenue retention 120%+; expanding platform.'},MDB:{dte:25,r:'Atlas vector database for AI workloads; developer-first go-to-market; multi-cloud expanding TAM.'},SHOP:{dte:25,r:'Merchant AI tools driving attach rate; payments growing 30%+; international expansion early stage.'}};
 const UF_META={SPY:{dte:7,r:'Unusual call sweep — broad market bullish positioning.'},QQQ:{dte:7,r:'Tech ETF large call block — institutional tech breakout positioning.'},COIN:{dte:14,r:'Crypto leverage play; large call sweep on Bitcoin correlation.'},MSTR:{dte:14,r:'Bitcoin proxy; options flow mirrors BTC move expectations.'},RIVN:{dte:14,r:'EV recovery; significant call sweep vs average volume.'},LCID:{dte:14,r:'Low-float EV; unusual call sweep with elevated open interest.'},GME:{dte:7,r:'Meme momentum; short squeeze risk elevated.'},AMC:{dte:7,r:'Retail momentum and short interest elevated.'},SOFI:{dte:21,r:'Fintech recovery; large call block above resistance.'},HOOD:{dte:14,r:'Trading platform gaining; flow suggests breakout expectation.'},IONQ:{dte:21,r:'Quantum computing; unusual sweep above resistance.'},RGTI:{dte:14,r:'Quantum play with aggressive call buying at multiple strikes.'},QUBT:{dte:14,r:'Quantum computing speculative flow; high relative volume.'},ACHR:{dte:21,r:'eVTOL FAA progress; institutional call sweep.'},JOBY:{dte:21,r:'Air taxi FAA certification; unusual flow pattern.'},RKLB:{dte:21,r:'Space launch cadence; rocket momentum in options.'},LUNR:{dte:14,r:'Lunar program milestones; speculative flow elevated.'},SOUN:{dte:14,r:'Voice AI partnerships; unusual volume with call concentration.'},ARKG:{dte:21,r:'Genomics ETF recovery; large block buy detected.'},ARKK:{dte:14,r:'Innovation ETF; unusual options flow.'},UPST:{dte:21,r:'AI lending; large call block at OTM strikes.'},AFRM:{dte:21,r:'BNPL recovery; unusual sweep above resistance.'},APP:{dte:21,r:'App monetization; aggressive call buying at multiple strikes.'},HIMS:{dte:21,r:'Weight loss drug platform; unusual call activity.'},GRAB:{dte:14,r:'SE Asia super-app; unusual volume surge.'}};
 const RANGES={'1D':{period:'1d',interval:'5m'},'1W':{period:'5d',interval:'15m'},'1M':{period:'1mo',interval:'1d'},'1Y':{period:'1y',interval:'1d'},'5Y':{period:'5y',interval:'1wk'}};
 
 // ─── STATE ───
-let spPicks=[], putPicks=[], ufPicks=[], rocketPicks=[], customStocks={}, trades={};
+let spPicks=[], putPicks=[], ufPicks=[], rocketPicks=[], squeezePicks=[], customStocks={}, trades={};
 let selTicker=null, selMode='sp', activeChart=null, scanned=false;
 let autoRefreshTimer=null, currentRange='1M';
 
@@ -343,10 +408,21 @@ async function runScan(){
   let mi=0;const iv=setInterval(()=>{btn.textContent=msgs[mi++%msgs.length];},700);
   document.getElementById('mpanel').innerHTML='<div class="lov"><div class="spin"></div><div class="lmsg">Scanning market data...</div></div>';
   try{
-    const [spQ,ufQ,rktQ,putQ]=await Promise.all([yFetch(SP500_LIST),yFetch(UNUSUAL_LIST),yFetch(ROCKET_LIST),yFetch(PUTS_LIST)]);
+    const [spQ,ufQ,rktQ,putQ,sqzQ]=await Promise.all([yFetch(SP500_LIST),yFetch(UNUSUAL_LIST),yFetch(ROCKET_LIST),yFetch(PUTS_LIST),yFetch(SQUEEZE_LIST)]);
     if(!spQ.length&&!ufQ.length)throw new Error('No data returned. Make sure server.py is running.');
     spPicks=spQ.filter(q=>q.regularMarketPrice>0).map(q=>({...q,_score:scoreBull(q),_mode:'sp',_op:optCall(q.symbol,q.regularMarketPrice,'sp'),_entry:+(q.regularMarketPrice*0.995).toFixed(2),_target:+(q.regularMarketPrice*1.072).toFixed(2),_stop:+(q.regularMarketPrice*0.962).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
     ufPicks=ufQ.filter(q=>q.regularMarketPrice>0).map(q=>({...q,_score:scoreUnusual(q),_mode:'uf',_op:optCall(q.symbol,q.regularMarketPrice,'uf'),_entry:+(q.regularMarketPrice*0.998).toFixed(2),_target:+(q.regularMarketPrice*1.08).toFixed(2),_stop:+(q.regularMarketPrice*0.955).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
+    squeezePicks=sqzQ.filter(q=>squeezeScore(q)>0&&q.regularMarketPrice>=0.30).map(q=>({...q,
+      _score:squeezeScore(q),_mode:'squeeze',
+      _op:optCall(q.symbol,q.regularMarketPrice,'sp'),
+      _entry:+(q.regularMarketPrice*0.998).toFixed(2),
+      _target:+(q.regularMarketPrice*1.25).toFixed(2),// +25% target for squeezes
+      _stop:+(q.regularMarketPrice*0.92).toFixed(2),  // tight -8% stop
+      _vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1),
+      _shortPct:q.shortPercentOfFloat||0,
+      _floatSh:q.floatShares||0,
+      _shortRatio:q.shortRatio||0
+    })).sort((a,b)=>b._score-a._score).slice(0,5);
     rocketPicks=rktQ.filter(q=>scoreRocket(q)>0&&q.regularMarketPrice>=5).map(q=>({...q,_score:scoreRocket(q),_mode:'rocket',_op:optPR(q.symbol,q.regularMarketPrice),_entry:+(q.regularMarketPrice*0.997).toFixed(2),_target:+(q.regularMarketPrice*1.20).toFixed(2),_stop:+(q.regularMarketPrice*0.93).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,3);
     putPicks=putQ.filter(q=>scoreBear(q)>40&&q.regularMarketPrice>=3).map(q=>({...q,_score:scoreBear(q),_mode:'puts',_op:optPut(q.symbol,q.regularMarketPrice),_entry:+(q.regularMarketPrice*1.003).toFixed(2),_target:+(q.regularMarketPrice*0.93).toFixed(2),_stop:+(q.regularMarketPrice*1.03).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
     scanned=true;
@@ -354,6 +430,7 @@ async function runScan(){
     document.getElementById('badge-puts').textContent=putPicks.length;
     document.getElementById('badge-uf').textContent=ufPicks.length;
     document.getElementById('badge-rocket').textContent=rocketPicks.length;
+    document.getElementById('badge-squeeze').textContent=squeezePicks.length;
     document.getElementById('scnt').textContent=(spQ.length+ufQ.length)+' scanned';
     const picks=selMode==='puts'?putPicks:selMode==='rocket'?rocketPicks:selMode==='uf'?ufPicks:spPicks;
     if(selMode==='custom'){renderCustomSidebar();}
@@ -373,6 +450,13 @@ function switchMode(mode,el){
   document.querySelectorAll('.mode-tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');
   document.getElementById('custom-search-bar').style.display=mode==='custom'?'block':'none';
   if(mode==='rocket'){document.getElementById('sideTitle').textContent='🚀 Daily Rockets';renderRocketSidebar();if(rocketPicks.length)selectStock(rocketPicks[0].symbol,'rocket');else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🚀</div><div>Hit Scan to find rockets</div></div>';return;}
+  if(mode==='squeeze'){
+    document.getElementById('sideTitle').textContent='🎯 Squeeze Scanner';
+    renderSqueezeSidebar();
+    if(squeezePicks.length)selectStock(squeezePicks[0].symbol,'squeeze');
+    else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🎯</div><div style="font-size:13px;color:var(--t2)">Hit Scan to find squeeze plays</div><div style="font-size:10px;color:var(--t3);margin-top:6px">Best run at 8 PM ET after market close</div></div>';
+    return;
+  }
   if(mode==='custom'){document.getElementById('sideTitle').textContent='Custom Lookup';renderCustomSidebar();const last=Object.keys(customStocks).pop();if(last)selectStock(last,'custom');else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🔍</div><div style="font-size:13px;color:var(--t2)">Enter a ticker in the sidebar</div></div>';return;}
   if(mode==='puts'){document.getElementById('sideTitle').textContent='📉 Top Puts';renderSidebar();if(putPicks.length)selectStock(putPicks[0].symbol,'puts');return;}
   document.getElementById('sideTitle').textContent=mode==='sp'?'S&P 500 Calls':'Unusual Flow';
@@ -409,6 +493,26 @@ function renderRocketSidebar(){
       '<div class="tags"><span class="rocket-tag">🚀 +20% TARGET</span></div>'+
       '<div class="pot-bar"><div class="pot-fill" style="width:'+s._score+'%"></div></div>'+
       '<div class="ichk"><input type="checkbox" id="chk-'+s.symbol+'" '+(trades[s.symbol]?'checked':'')+' onchange="toggleTrade(\''+s.symbol+'\',\'rocket\',this.checked)" onclick="event.stopPropagation()"><label for="chk-'+s.symbol+'" onclick="event.stopPropagation()">I\'m in</label></div>'+tpill(s.symbol)+'</div>';
+  }).join('');
+}
+function renderSqueezeSidebar(){
+  document.getElementById('scnt').textContent=squeezePicks.length?squeezePicks.length+' plays':'Not scanned';
+  if(!squeezePicks.length){document.getElementById('slist').innerHTML='<div style="padding:14px;text-align:center;color:var(--t3);font-size:10px;line-height:1.9">Hit Scan to find<br>squeeze candidates<br><span style="color:var(--amber)">Best at 8 PM ET</span></div>';return;}
+  document.getElementById('slist').innerHTML=squeezePicks.map((s,i)=>{
+    const ae=atEntry(s);
+    const shortColor=s._shortPct>25?'var(--red)':s._shortPct>10?'var(--amber)':'var(--t2)';
+    return '<div class="sitem '+(selTicker===s.symbol&&selMode==='squeeze'?'active':'')+' '+(trades[s.symbol]?'intrade':'')+' '+(ae?'at-entry':'')+'" onclick="selectStock(''+s.symbol+'','squeeze')" id="si-'+s.symbol+'">'+
+      '<div class="srow1"><span class="stk">'+s.symbol+(ae?'<span class="entry-badge">▲ NOW</span>':'')+'</span><span class="rnum" style="color:var(--amber)">#'+(i+1)+'</span></div>'+
+      '<div class="sname">'+(s.shortName||s.symbol)+'</div>'+
+      '<div class="sprow"><span class="sp">$'+(s.regularMarketPrice||0).toFixed(2)+'</span><span class="chg '+((s.regularMarketChangePercent||0)>=0?'cu':'cd')+'">'+(s.regularMarketChangePercent||0 >=0?'+':'')+(s.regularMarketChangePercent||0).toFixed(2)+'%</span></div>'+
+      '<div style="display:flex;justify-content:space-between;font-size:8px;font-family:var(--mono);margin-bottom:2px">'+
+      '<span style="color:var(--t3)">Float: <span style="color:var(--amber)">'+fmtFloat(s._floatSh)+'</span></span>'+
+      '<span style="color:var(--t3)">Short: <span style="color:'+shortColor+'">'+( s._shortPct?s._shortPct.toFixed(1)+'%':'—')+'</span></span>'+
+      '</div>'+
+      '<div class="swrap"><div class="stop2"><span>Squeeze Score</span><span>'+s._score+'/100</span></div><div class="sbar"><div class="sfill" style="width:'+s._score+'%;background:linear-gradient(90deg,var(--amber),var(--red))"></div></div></div>'+
+      '<div class="tags"><span class="tag" style="background:rgba(251,191,36,.1);color:var(--amber);border-color:rgba(251,191,36,.25)">🎯 SQUEEZE</span>'+
+      (s._shortPct>20?'<span class="tag" style="background:rgba(248,113,113,.1);color:var(--red);border-color:rgba(248,113,113,.25)">HIGH SHORT</span>':'')+'</div>'+
+      '<div class="ichk"><input type="checkbox" id="chk-'+s.symbol+'" '+(trades[s.symbol]?'checked':'')+' onchange="toggleTrade(''+s.symbol+'','squeeze',this.checked)" onclick="event.stopPropagation()"><label for="chk-'+s.symbol+'" onclick="event.stopPropagation()">I'm in</label></div>'+tpill(s.symbol)+'</div>';
   }).join('');
 }
 function renderCustomSidebar(){
@@ -451,11 +555,12 @@ async function setRange(range){
 // ─── STOCK PANEL ───
 async function selectStock(ticker,mode){
   selTicker=ticker;selMode=mode;
-  if(mode==='custom')renderCustomSidebar();else if(mode==='rocket')renderRocketSidebar();else renderSidebar();
+  if(mode==='custom')renderCustomSidebar();else if(mode==='rocket')renderRocketSidebar();else if(mode==='squeeze')renderSqueezeSidebar();else renderSidebar();
   let s;
   if(mode==='custom')s=customStocks[ticker];
   else if(mode==='rocket')s=rocketPicks.find(x=>x.symbol===ticker);
   else if(mode==='puts')s=putPicks.find(x=>x.symbol===ticker);
+  else if(mode==='squeeze')s=squeezePicks.find(x=>x.symbol===ticker);
   else s=(mode==='sp'?spPicks:ufPicks).find(x=>x.symbol===ticker);
   if(!s)return;
   document.getElementById('mpanel').innerHTML='<div class="lov"><div class="spin"></div><div class="lmsg">Loading '+ticker+'...</div></div>';
@@ -464,8 +569,8 @@ async function selectStock(ticker,mode){
   try{[hist,newsItems]=await Promise.all([fetchHist(ticker,RANGES[currentRange].period,RANGES[currentRange].interval),fetchStockNews(ticker)]);}catch(e){}
   const labels=hist.length?hist.map(h=>h.date):makeDates(30);
   const prices=hist.length?hist.map(h=>h.close):genFake(s.regularMarketPrice,30);
-  const isPuts=mode==='puts',isUF=mode==='uf',isRocket=mode==='rocket';
-  const lineColor=isPuts?'#f87171':isUF?'#a78bfa':isRocket?'#fbbf24':'#34d399';
+  const isPuts=mode==='puts',isUF=mode==='uf',isRocket=mode==='rocket',isSqueeze=mode==='squeeze';
+  const lineColor=isPuts?'#f87171':isUF?'#a78bfa':isRocket?'#fbbf24':isSqueeze?'#f97316':'#34d399';
   const isTrade=trades[ticker],op=s._op;
   const chg=s.regularMarketChangePercent||0;
   const pre=s.preMarketPrice||0,preChg=s.preMarketChangePercent||0;
@@ -498,6 +603,7 @@ async function selectStock(ticker,mode){
     '<div class="zones"><div class="zone '+(isPuts?'zst':'ze')+'"><div class="zlbl">'+z1lbl+'</div><div class="zval">$'+s._entry+'</div></div><div class="zone '+(isPuts?'ze':'zs')+'"><div class="zlbl">'+z2lbl+'</div><div class="zval">$'+s._target+'</div></div><div class="zone '+(isPuts?'zs':'zst')+'"><div class="zlbl">'+z3lbl+'</div><div class="zval">$'+s._stop+'</div></div></div>'+
     '<div class="ogrid"><div class="ocard"><div class="olbl">Option Type</div><div class="oval '+(isPuts?'or':'og')+'">'+op.type+'</div></div><div class="ocard"><div class="olbl">Strike</div><div class="oval ob">$'+op.strike+'</div></div><div class="ocard"><div class="olbl">Expiry</div><div class="oval">'+op.expiryStr+'</div></div><div class="ocard"><div class="olbl">DTE</div><div class="oval oa">'+op.dte+' days</div></div><div class="ocard"><div class="olbl">Est Premium</div><div class="oval">$'+op.prem+'</div></div><div class="ocard"><div class="olbl">Vol/Avg</div><div class="oval '+(isUF||isRocket?'op':isPuts?'or':'og')+'">'+s._vr+'x</div></div></div>'+
     '<div class="ogrid"><div class="ocard"><div class="olbl">Market Cap</div><div class="oval">'+(s.marketCap?'$'+fmtBig(s.marketCap):'—')+'</div></div><div class="ocard"><div class="olbl">52-Wk High</div><div class="oval">$'+(s.fiftyTwoWeekHigh||0).toFixed(2)+'</div></div><div class="ocard"><div class="olbl">52-Wk Low</div><div class="oval">$'+(s.fiftyTwoWeekLow||0).toFixed(2)+'</div></div></div>'+
+    (isSqueeze?'<div class="ogrid"><div class="ocard"><div class="olbl">Float Shares</div><div class="oval" style="color:var(--amber)">'+fmtFloat(s._floatSh||0)+'</div></div><div class="ocard"><div class="olbl">Short % Float</div><div class="oval" style="color:'+(( s._shortPct||0)>20?'var(--red)':'var(--amber)')+'">'+((s._shortPct||0).toFixed(1))+'%</div></div><div class="ocard"><div class="olbl">Days to Cover</div><div class="oval oa">'+((s._shortRatio||0).toFixed(1))+' days</div></div></div><div style="background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:7px;padding:10px 13px;margin-bottom:10px;font-size:11px"><strong style="color:var(--amber)">⚠️ Squeeze Play Rules:</strong><br><span style="color:var(--t2)">1. Enter only after 9:40 AM when volume confirms<br>2. Never hold through lunch (11:30–1:30 PM)<br>3. Take 50% off at +15%, let rest run to target<br>4. Honor the -8% stop — these reverse fast</span></div>':'')+''+
     '<div class="why-box"><div class="why-hdr"><span class="why-title">📰 Why '+ticker+' is moving</span><span class="'+(chg>=0?'why-up':'why-dn')+'">'+(chg>=0?'▲ UP':'▼ DOWN')+' '+Math.abs(chg).toFixed(2)+'%</span></div><div class="why-analysis">'+whyText+'</div><div class="why-news"><div class="why-news-ttl">Latest Headlines</div>'+newsHtml+'</div></div>'+
     '<div class="abox"><strong>'+(isPuts?'Why this PUT:':'Why this pick:')+'</strong> '+op.r+'</div>'+
     '<div class="tbox"><input type="checkbox" id="chkM-'+ticker+'" '+(isTrade?'checked':'')+' onchange="toggleTrade(\''+ticker+'\',\''+mode+'\',this.checked)"><label for="chkM-'+ticker+'">✓ I\'m in this trade — auto-track &amp; alert me</label></div>'+
@@ -526,7 +632,7 @@ async function getPrediction(ticker, timeframe){
   if(result)result.innerHTML='<div class="spin" style="width:18px;height:18px;border-width:1.5px;margin:8px auto"></div>';
   try{
     // Pass current stock data so server doesn't need to re-fetch (avoids $0 bug)
-    const allPP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)];
+    const allPP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...squeezePicks,...Object.values(customStocks)];
     const sdata=allPP.find(x=>x.symbol===ticker)||{};
     const pparams=new URLSearchParams({symbol:ticker,timeframe,
       price:sdata.regularMarketPrice||0,chg:sdata.regularMarketChangePercent||0,
@@ -561,11 +667,11 @@ function buildSig(ticker,s,t){
 
 // ─── TRADE TRACKING ───
 function toggleTrade(ticker,mode,checked){
-  const allP=mode==='custom'?Object.values(customStocks):mode==='rocket'?rocketPicks:mode==='puts'?putPicks:mode==='sp'?spPicks:ufPicks;
+  const allP=mode==='custom'?Object.values(customStocks):mode==='rocket'?rocketPicks:mode==='puts'?putPicks:mode==='squeeze'?squeezePicks:mode==='sp'?spPicks:ufPicks;
   const s=allP.find(x=>x.symbol===ticker);if(!s)return;
   if(checked){trades[ticker]={entry:s._entry,time:new Date().toLocaleTimeString(),mode,status:'hold',pnl:'0.00',currentPrice:s._entry,lastCheck:'just opened'};showAlert(ticker,'Tracking · Entry $'+s._entry+' · Target $'+s._target+' · Stop $'+s._stop);startAutoRefresh();}
   else delete trades[ticker];
-  if(mode==='custom')renderCustomSidebar();else if(mode==='rocket')renderRocketSidebar();else renderSidebar();
+  if(mode==='custom')renderCustomSidebar();else if(mode==='rocket')renderRocketSidebar();else if(mode==='squeeze')renderSqueezeSidebar();else renderSidebar();
   if(selTicker===ticker)selectStock(ticker,mode);
 }
 
@@ -584,12 +690,12 @@ async function doRefresh(){
   const quotes=await priceFetch(allSyms);
   if(!quotes.length){if(d)d.style.background='var(--red)';return;}
   quotes.forEach(q=>{
-    [spPicks,putPicks,ufPicks,rocketPicks].forEach(arr=>{const i=arr.findIndex(s=>s.symbol===q.symbol);if(i>=0){arr[i].regularMarketPrice=q.regularMarketPrice;arr[i].regularMarketChangePercent=q.regularMarketChangePercent;arr[i].regularMarketVolume=q.regularMarketVolume;arr[i]._vr=+((q.regularMarketVolume||0)/(arr[i].averageDailyVolume3Month||1)).toFixed(1);}});
+    [spPicks,putPicks,ufPicks,rocketPicks,squeezePicks].forEach(arr=>{const i=arr.findIndex(s=>s.symbol===q.symbol);if(i>=0){arr[i].regularMarketPrice=q.regularMarketPrice;arr[i].regularMarketChangePercent=q.regularMarketChangePercent;arr[i].regularMarketVolume=q.regularMarketVolume;arr[i]._vr=+((q.regularMarketVolume||0)/(arr[i].averageDailyVolume3Month||1)).toFixed(1);}});
     if(customStocks[q.symbol]){customStocks[q.symbol].regularMarketPrice=q.regularMarketPrice;customStocks[q.symbol].regularMarketChangePercent=q.regularMarketChangePercent;customStocks[q.symbol].regularMarketVolume=q.regularMarketVolume;}
   });
   updateTrades(quotes);
   // Check entry zone for all scanned picks and alert via Telegram
-  const allTracked=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)];
+  const allTracked=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...squeezePicks,...Object.values(customStocks)];
   allTracked.forEach(s=>{
     if(atEntry(s)&&!s._tgEntryFired){
       s._tgEntryFired=true;
@@ -618,7 +724,7 @@ function updateLivePrice(){
 function updateTrades(quotes){
   quotes.forEach(q=>{
     const t=trades[q.symbol];if(!t)return;
-    const price=q.regularMarketPrice,allP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)],s=allP.find(x=>x.symbol===q.symbol);if(!s)return;
+    const price=q.regularMarketPrice,allP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...squeezePicks,...Object.values(customStocks)],s=allP.find(x=>x.symbol===q.symbol);if(!s)return;
     const pnl=((price-t.entry)/t.entry*100).toFixed(2);
     trades[q.symbol].currentPrice=price;trades[q.symbol].pnl=pnl;trades[q.symbol].lastCheck=new Date().toLocaleTimeString();
     const prev=t.status;
@@ -685,6 +791,20 @@ function makeDates(n){return Array.from({length:n},(_,i)=>{const d=new Date();d.
 function fmtBig(n){if(n>=1e12)return(n/1e12).toFixed(1)+'T';if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(0)+'M';return n.toFixed(0);}
 
 
+
+async function testTelegram(){
+  const btn=event.target;btn.textContent='Sending...';btn.disabled=true;
+  try{
+    const r=await fetch('/test-telegram');
+    const d=await r.json();
+    btn.textContent='🔔 Sent!';
+    setTimeout(()=>{btn.textContent='🔔 Test';btn.disabled=false;},3000);
+    showAlert('Telegram','Check your Telegram — test message sent!');
+  }catch(e){
+    btn.textContent='🔔 Failed';btn.disabled=false;
+    showAlert('Telegram','Failed — check server is running');
+  }
+}
 // ─── TELEGRAM ALERTS ───
 async function tgAlert(msg){
   try{ await fetch('/notify?msg='+encodeURIComponent(msg)); }catch(e){}

@@ -62,6 +62,13 @@ def get_quotes(symbols):
             mkt_state  = info.get('marketState', 'CLOSED')
             pre_chg_pct  = ((pre_price  - price) / price * 100) if pre_price  and price else 0
             post_chg_pct = ((post_price - price) / price * 100) if post_price and price else 0
+            # Float + short interest for squeeze scanner
+            float_sh   = int(info.get("floatShares") or 0)
+            short_pct  = float(info.get("shortPercentOfFloat") or 0)
+            short_ratio= float(info.get("shortRatio") or 0)
+            # shortPercentOfFloat is 0-1 decimal in yfinance, convert to %
+            if short_pct > 0 and short_pct < 1:
+                short_pct = round(short_pct * 100, 2)
             results.append({
                 "symbol": sym, "shortName": info.get("shortName", sym),
                 "regularMarketPrice": round(price,2),
@@ -76,6 +83,9 @@ def get_quotes(symbols):
                 "postMarketPrice": round(post_price,2),
                 "postMarketChangePercent": round(post_chg_pct,2),
                 "marketState": mkt_state,
+                "floatShares":   float_sh,
+                "shortPercentOfFloat": short_pct,
+                "shortRatio":    short_ratio,
             })
             print(f"  OK  {sym:6}  ${round(price,2)}")
         except Exception as e:
@@ -337,6 +347,12 @@ def predict():
             print(f"  AI predict error: {e}")
     return cors({"prediction":get_rule_prediction(sym,d,tf),"ai":False})
 
+
+
+@app.route('/test-telegram')
+def test_telegram():
+    send_telegram('✅ Options Scanner Pro — Telegram connected!\n\n🇪🇹 Abiy Kassa · St Louis MO\nNotifications are working. You will receive alerts for:\n🎯 Entry zone reached\n💰 Target hit — take profit\n🛑 Stop hit — exit now')
+    return cors({"ok": True, "msg": "Test sent — check your Telegram"})
 
 @app.route('/notify')
 def notify():
