@@ -211,6 +211,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;displ
 <div class="layout">
   <div class="sidebar">
     <div class="sbhdr"><span class="sbtitle" id="sideTitle">S&amp;P 500 Calls</span><span class="scnt" id="scnt">Not scanned</span></div>
+    <div id="squeeze-rescan-bar" style="display:none;padding:6px 10px;border-bottom:1px solid var(--border)"><button onclick="runSqueezeScan()" style="width:100%;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:var(--amber);border-radius:5px;padding:5px;font-size:10px;font-family:var(--mono);cursor:pointer">🔄 Rescan Squeeze</button></div>
     <div id="custom-search-bar" style="display:none" class="cust-search">
       <div class="cust-row"><input id="custom-input" class="cust-inp" type="text" placeholder="Ticker..." onkeydown="if(event.key==='Enter')lookupCustom()"><button class="cust-go" id="lookup-btn" onclick="lookupCustom()">Go</button></div>
       <div class="cust-quick">
@@ -251,25 +252,24 @@ const PUTS_LIST=['NVDA','TSLA','AAPL','MSFT','META','AMZN','GOOGL','AVGO','NFLX'
 
 // Low Float Short Squeeze candidates
 const SQUEEZE_LIST=[
-  // From real Telegram watchlists — known low-float plays
+  // Low float known active plays (delisted removed)
   'DEVS','SDOT','LASE','CMND','SPCE','STI',
-  // Crypto miners (low float, high volatility)
+  // Crypto miners
   'HUT','MARA','RIOT','CIFR','BTBT','IREN','CLSK',
-  // EV / speculative
-  'NKLA','GOEV','WKHS','FSR','MULN','FFIE',
-  'LCID','RIVN','PTRA',
-  // Biotech / pharma (high short interest)
-  'OCGN','VXRT','SIGA','TLRY','CGC','CRON',
-  'ATHX','ITRM','CTXR','BFRI',
-  // Meme / retail favorites
-  'GME','AMC','KOSS','BBBY','CLOV',
+  // EV speculative (active only)
+  'LCID','RIVN','WKHS',
+  // Biotech high short interest
+  'OCGN','VXRT','SIGA','TLRY','CGC','CRON','ITRM',
+  // Meme / retail
+  'GME','AMC','CLOV',
   // Small cap tech
-  'SOUN','BBAI','ATER','IRNT','GFAI','DPRO',
-  'BKKT','WRAP','WISA','ILUS',
+  'SOUN','BBAI','GFAI','BKKT','WRAP',
   // Space / defense
-  'LUNR','RKLB','ACHR','JOBY','LILM',
-  // Other known squeeze plays
-  'HOOD','SOFI','OPEN','WISH','OPAD','SPRT'
+  'LUNR','RKLB','ACHR','JOBY',
+  // Fintech
+  'HOOD','SOFI',
+  // Additional active low-float plays
+  'HIMS','RDDT','APP','IONQ','RGTI','QUBT','MSTR'
 ];
 
 function squeezeScore(q){
@@ -401,6 +401,47 @@ function generateWhy(s){
   return parts.join(' ');
 }
 
+
+// ─── SEPARATE SQUEEZE SCAN ───────────────────────────────────────────
+async function runSqueezeScan(){
+  const btn=event?.target;
+  if(btn){btn.disabled=true;btn.textContent='Scanning...';}
+  document.getElementById('mpanel').innerHTML='<div class="lov"><div class="spin"></div><div class="lmsg">Scanning '+SQUEEZE_LIST.length+' low-float stocks...</div></div>';
+  document.getElementById('slist').innerHTML='<div style="padding:12px;text-align:center;color:var(--t3);font-size:10px;font-family:var(--mono)">Fetching float & short data...</div>';
+  try{
+    const sqzQ=await yFetch(SQUEEZE_LIST);
+    if(!sqzQ.length) throw new Error('No data returned');
+    squeezePicks=sqzQ
+      .filter(q=>squeezeScore(q)>0&&(q.regularMarketPrice||0)>=0.30)
+      .map(q=>({...q,
+        _score:squeezeScore(q),_mode:'squeeze',
+        _op:optCall(q.symbol,q.regularMarketPrice,'sp'),
+        _entry:+(q.regularMarketPrice*0.998).toFixed(2),
+        _target:+(q.regularMarketPrice*1.25).toFixed(2),
+        _stop:+(q.regularMarketPrice*0.92).toFixed(2),
+        _vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1),
+        _shortPct:q.shortPercentOfFloat||0,
+        _floatSh:q.floatShares||0,
+        _shortRatio:q.shortRatio||0
+      }))
+      .sort((a,b)=>b._score-a._score)
+      .slice(0,5);
+    document.getElementById('badge-squeeze').textContent=squeezePicks.length;
+    document.getElementById('scnt').textContent=squeezePicks.length+' found · '+new Date().toLocaleTimeString();
+    renderSqueezeSidebar();
+    if(squeezePicks.length){
+      selectStock(squeezePicks[0].symbol,'squeeze');
+      showAlert(squeezePicks[0].symbol,'#1 Squeeze · Score '+squeezePicks[0]._score+'/100 · Short '+( squeezePicks[0]._shortPct||0).toFixed(1)+'% · Float '+fmtFloat(squeezePicks[0]._floatSh));
+    } else {
+      document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">😐</div><div style="font-size:13px;color:var(--t2)">No squeeze setups right now</div><div style="font-size:11px;color:var(--t3);margin-top:6px">Try again at 8 PM ET after close or 6:30 AM pre-market</div></div>';
+    }
+    startAutoRefresh();
+  }catch(e){
+    document.getElementById('mpanel').innerHTML='<div class="errmsg"><strong>Squeeze scan failed:</strong> '+e.message+'</div>';
+  }
+  if(btn){btn.disabled=false;btn.textContent='🔄 Rescan Squeeze';}
+}
+
 // ─── MAIN SCAN ───
 async function runScan(){
   const btn=document.getElementById('scanBtn');btn.disabled=true;
@@ -408,21 +449,10 @@ async function runScan(){
   let mi=0;const iv=setInterval(()=>{btn.textContent=msgs[mi++%msgs.length];},700);
   document.getElementById('mpanel').innerHTML='<div class="lov"><div class="spin"></div><div class="lmsg">Scanning market data...</div></div>';
   try{
-    const [spQ,ufQ,rktQ,putQ,sqzQ]=await Promise.all([yFetch(SP500_LIST),yFetch(UNUSUAL_LIST),yFetch(ROCKET_LIST),yFetch(PUTS_LIST),yFetch(SQUEEZE_LIST)]);
+    const [spQ,ufQ,rktQ,putQ]=await Promise.all([yFetch(SP500_LIST),yFetch(UNUSUAL_LIST),yFetch(ROCKET_LIST),yFetch(PUTS_LIST)]);
     if(!spQ.length&&!ufQ.length)throw new Error('No data returned. Make sure server.py is running.');
     spPicks=spQ.filter(q=>q.regularMarketPrice>0).map(q=>({...q,_score:scoreBull(q),_mode:'sp',_op:optCall(q.symbol,q.regularMarketPrice,'sp'),_entry:+(q.regularMarketPrice*0.995).toFixed(2),_target:+(q.regularMarketPrice*1.072).toFixed(2),_stop:+(q.regularMarketPrice*0.962).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
     ufPicks=ufQ.filter(q=>q.regularMarketPrice>0).map(q=>({...q,_score:scoreUnusual(q),_mode:'uf',_op:optCall(q.symbol,q.regularMarketPrice,'uf'),_entry:+(q.regularMarketPrice*0.998).toFixed(2),_target:+(q.regularMarketPrice*1.08).toFixed(2),_stop:+(q.regularMarketPrice*0.955).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
-    squeezePicks=sqzQ.filter(q=>squeezeScore(q)>0&&q.regularMarketPrice>=0.30).map(q=>({...q,
-      _score:squeezeScore(q),_mode:'squeeze',
-      _op:optCall(q.symbol,q.regularMarketPrice,'sp'),
-      _entry:+(q.regularMarketPrice*0.998).toFixed(2),
-      _target:+(q.regularMarketPrice*1.25).toFixed(2),// +25% target for squeezes
-      _stop:+(q.regularMarketPrice*0.92).toFixed(2),  // tight -8% stop
-      _vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1),
-      _shortPct:q.shortPercentOfFloat||0,
-      _floatSh:q.floatShares||0,
-      _shortRatio:q.shortRatio||0
-    })).sort((a,b)=>b._score-a._score).slice(0,5);
     rocketPicks=rktQ.filter(q=>scoreRocket(q)>0&&q.regularMarketPrice>=5).map(q=>({...q,_score:scoreRocket(q),_mode:'rocket',_op:optPR(q.symbol,q.regularMarketPrice),_entry:+(q.regularMarketPrice*0.997).toFixed(2),_target:+(q.regularMarketPrice*1.20).toFixed(2),_stop:+(q.regularMarketPrice*0.93).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,3);
     putPicks=putQ.filter(q=>scoreBear(q)>40&&q.regularMarketPrice>=3).map(q=>({...q,_score:scoreBear(q),_mode:'puts',_op:optPut(q.symbol,q.regularMarketPrice),_entry:+(q.regularMarketPrice*1.003).toFixed(2),_target:+(q.regularMarketPrice*0.93).toFixed(2),_stop:+(q.regularMarketPrice*1.03).toFixed(2),_vr:+((q.regularMarketVolume||0)/(q.averageDailyVolume3Month||1)).toFixed(1)})).sort((a,b)=>b._score-a._score).slice(0,5);
     scanned=true;
@@ -430,7 +460,6 @@ async function runScan(){
     document.getElementById('badge-puts').textContent=putPicks.length;
     document.getElementById('badge-uf').textContent=ufPicks.length;
     document.getElementById('badge-rocket').textContent=rocketPicks.length;
-    document.getElementById('badge-squeeze').textContent=squeezePicks.length;
     document.getElementById('scnt').textContent=(spQ.length+ufQ.length)+' scanned';
     const picks=selMode==='puts'?putPicks:selMode==='rocket'?rocketPicks:selMode==='uf'?ufPicks:spPicks;
     if(selMode==='custom'){renderCustomSidebar();}
@@ -449,12 +478,26 @@ function switchMode(mode,el){
   selMode=mode;
   document.querySelectorAll('.mode-tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');
   document.getElementById('custom-search-bar').style.display=mode==='custom'?'block':'none';
+  document.getElementById('squeeze-rescan-bar').style.display=mode==='squeeze'?'block':'none';
   if(mode==='rocket'){document.getElementById('sideTitle').textContent='🚀 Daily Rockets';renderRocketSidebar();if(rocketPicks.length)selectStock(rocketPicks[0].symbol,'rocket');else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🚀</div><div>Hit Scan to find rockets</div></div>';return;}
   if(mode==='squeeze'){
     document.getElementById('sideTitle').textContent='🎯 Squeeze Scanner';
+    document.getElementById('squeeze-rescan-bar').style.display='block';
     renderSqueezeSidebar();
     if(squeezePicks.length)selectStock(squeezePicks[0].symbol,'squeeze');
-    else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🎯</div><div style="font-size:13px;color:var(--t2)">Hit Scan to find squeeze plays</div><div style="font-size:10px;color:var(--t3);margin-top:6px">Best run at 8 PM ET after market close</div></div>';
+    else document.getElementById('mpanel').innerHTML=`
+      <div class="lov">
+        <div style="font-size:38px">🎯</div>
+        <div style="font-size:14px;color:var(--t2);margin-bottom:6px">Low Float Short Squeeze Scanner</div>
+        <div style="font-size:11px;color:var(--t3);font-family:var(--mono);margin-bottom:16px;text-align:center">
+          Best run at <strong style="color:var(--amber)">8:00–8:30 PM ET</strong> after market close<br>
+          or <strong style="color:var(--amber)">6:30 AM ET</strong> pre-market for confirmation
+        </div>
+        <button class="sbtn" onclick="runSqueezeScan()" style="font-size:13px;padding:10px 24px">
+          🎯 Run Squeeze Scan
+        </button>
+        <div style="font-size:10px;color:var(--t3);margin-top:10px;font-family:var(--mono)">Scans ${SQUEEZE_LIST.length} low-float stocks separately</div>
+      </div>`;
     return;
   }
   if(mode==='custom'){document.getElementById('sideTitle').textContent='Custom Lookup';renderCustomSidebar();const last=Object.keys(customStocks).pop();if(last)selectStock(last,'custom');else document.getElementById('mpanel').innerHTML='<div class="lov"><div style="font-size:34px">🔍</div><div style="font-size:13px;color:var(--t2)">Enter a ticker in the sidebar</div></div>';return;}
