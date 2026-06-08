@@ -540,22 +540,44 @@ function renderRocketSidebar(){
 }
 function renderSqueezeSidebar(){
   document.getElementById('scnt').textContent=squeezePicks.length?squeezePicks.length+' plays':'Not scanned';
-  if(!squeezePicks.length){document.getElementById('slist').innerHTML='<div style="padding:14px;text-align:center;color:var(--t3);font-size:10px;line-height:1.9">Hit Scan to find<br>squeeze candidates<br><span style="color:var(--amber)">Best at 8 PM ET</span></div>';return;}
-  document.getElementById('slist').innerHTML=squeezePicks.map((s,i)=>{
-    const ae=atEntry(s);
-    const shortColor=s._shortPct>25?'var(--red)':s._shortPct>10?'var(--amber)':'var(--t2)';
-    return '<div class="sitem '+(selTicker===s.symbol&&selMode==='squeeze'?'active':'')+' '+(trades[s.symbol]?'intrade':'')+' '+(ae?'at-entry':'')+'" onclick="selectStock(''+s.symbol+'','squeeze')" id="si-'+s.symbol+'">'+
-      '<div class="srow1"><span class="stk">'+s.symbol+(ae?'<span class="entry-badge">▲ NOW</span>':'')+'</span><span class="rnum" style="color:var(--amber)">#'+(i+1)+'</span></div>'+
-      '<div class="sname">'+(s.shortName||s.symbol)+'</div>'+
-      '<div class="sprow"><span class="sp">$'+(s.regularMarketPrice||0).toFixed(2)+'</span><span class="chg '+((s.regularMarketChangePercent||0)>=0?'cu':'cd')+'">'+(s.regularMarketChangePercent||0 >=0?'+':'')+(s.regularMarketChangePercent||0).toFixed(2)+'%</span></div>'+
-      '<div style="display:flex;justify-content:space-between;font-size:8px;font-family:var(--mono);margin-bottom:2px">'+
-      '<span style="color:var(--t3)">Float: <span style="color:var(--amber)">'+fmtFloat(s._floatSh)+'</span></span>'+
-      '<span style="color:var(--t3)">Short: <span style="color:'+shortColor+'">'+( s._shortPct?s._shortPct.toFixed(1)+'%':'—')+'</span></span>'+
-      '</div>'+
-      '<div class="swrap"><div class="stop2"><span>Squeeze Score</span><span>'+s._score+'/100</span></div><div class="sbar"><div class="sfill" style="width:'+s._score+'%;background:linear-gradient(90deg,var(--amber),var(--red))"></div></div></div>'+
-      '<div class="tags"><span class="tag" style="background:rgba(251,191,36,.1);color:var(--amber);border-color:rgba(251,191,36,.25)">🎯 SQUEEZE</span>'+
-      (s._shortPct>20?'<span class="tag" style="background:rgba(248,113,113,.1);color:var(--red);border-color:rgba(248,113,113,.25)">HIGH SHORT</span>':'')+'</div>'+
-      '<div class="ichk"><input type="checkbox" id="chk-'+s.symbol+'" '+(trades[s.symbol]?'checked':'')+' onchange="toggleTrade(''+s.symbol+'','squeeze',this.checked)" onclick="event.stopPropagation()"><label for="chk-'+s.symbol+'" onclick="event.stopPropagation()">I'm in</label></div>'+tpill(s.symbol)+'</div>';
+  if(!squeezePicks.length){
+    document.getElementById('slist').innerHTML='<div style="padding:14px;text-align:center;color:var(--t3);font-size:10px;line-height:1.9">Hit Scan to find<br>squeeze candidates<br><span style="color:var(--amber)">Best at 8 PM ET</span></div>';
+    return;
+  }
+  document.getElementById('slist').innerHTML=squeezePicks.map(function(s,i){
+    var ae=atEntry(s);
+    var shortColor=s._shortPct>25?'var(--red)':s._shortPct>10?'var(--amber)':'var(--t2)';
+    var sym=s.symbol;
+    var score=s._score;
+    var price=(s.regularMarketPrice||0).toFixed(2);
+    var chg=(s.regularMarketChangePercent||0);
+    var chgStr=(chg>=0?'+':'')+chg.toFixed(2)+'%';
+    var chgCls=chg>=0?'cu':'cd';
+    var floatStr=fmtFloat(s._floatSh||0);
+    var shortStr=s._shortPct?(s._shortPct).toFixed(1)+'%':'—';
+    var isActive=(selTicker===sym&&selMode==='squeeze');
+    var isTracked=trades[sym]?true:false;
+    var tp=tpill(sym);
+    var html='<div class="sitem'+(isActive?' active':'')+(isTracked?' intrade':'')+(ae?' at-entry':'')+'"';
+    html+=' onclick="selectStock(\''+sym+'\',\'squeeze\')"';
+    html+=' id="si-'+sym+'">';
+    html+='<div class="srow1"><span class="stk">'+sym+(ae?'<span class="entry-badge">&#9650; NOW</span>':'')+'</span>';
+    html+='<span class="rnum" style="color:var(--amber)">#'+(i+1)+'</span></div>';
+    html+='<div class="sname">'+(s.shortName||sym)+'</div>';
+    html+='<div class="sprow"><span class="sp">$'+price+'</span>';
+    html+='<span class="chg '+chgCls+'">'+chgStr+'</span></div>';
+    html+='<div style="display:flex;justify-content:space-between;font-size:8px;font-family:var(--mono);margin-bottom:2px">';
+    html+='<span style="color:var(--t3)">Float: <span style="color:var(--amber)">'+floatStr+'</span></span>';
+    html+='<span style="color:var(--t3)">Short: <span style="color:'+shortColor+'">'+shortStr+'</span></span></div>';
+    html+='<div class="swrap"><div class="stop2"><span>Squeeze Score</span><span>'+score+'/100</span></div>';
+    html+='<div class="sbar"><div class="sfill" style="width:'+score+'%;background:linear-gradient(90deg,var(--amber),var(--red))"></div></div></div>';
+    html+='<div class="tags"><span class="tag" style="background:rgba(251,191,36,.1);color:var(--amber);border-color:rgba(251,191,36,.25)">&#127919; SQUEEZE</span>';
+    if(s._shortPct>20) html+='<span class="tag" style="background:rgba(248,113,113,.1);color:var(--red);border-color:rgba(248,113,113,.25)">HIGH SHORT</span>';
+    html+='</div>';
+    html+='<div class="ichk"><input type="checkbox" id="chk-'+sym+'" '+(isTracked?'checked':'')+' onchange="toggleTrade(\''+sym+'\',\'squeeze\',this.checked)" onclick="event.stopPropagation()">';
+    html+='<label for="chk-'+sym+'" onclick="event.stopPropagation()">I\'m in</label></div>';
+    html+=tp+'</div>';
+    return html;
   }).join('');
 }
 function renderCustomSidebar(){
