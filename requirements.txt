@@ -2,3 +2,5 @@ flask
 gunicorn
 yfinance
 pandas
+APScheduler
+pytz

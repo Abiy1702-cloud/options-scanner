@@ -193,6 +193,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;displ
   <div class="tr">
     <div class="tdisp" id="clk">—</div>
     <div class="tdisp" id="last-refresh" style="display:none"><div class="ref-dot" id="ref-dot"></div><span id="ref-txt">—</span></div>
+    <div class="tdisp" id="server-track-badge" style="display:none;color:var(--green);font-size:9px">📡 Server tracking</div>
     <div class="mbadge mp" id="mbadge"><span class="ldot" id="ldot"></span><span id="mlbl">Loading</span></div>
     <button onclick="testTelegram()" title="Test Telegram notification" style="background:var(--bg3);border:1px solid var(--border2);color:var(--t2);border-radius:5px;padding:6px 10px;font-size:11px;cursor:pointer">🔔 Test</button>
     <button class="sbtn" id="scanBtn" onclick="runScan()">▶ Scan Morning Picks</button>
@@ -787,9 +788,19 @@ function buildSig(ticker,s,t){
 function toggleTrade(ticker,mode,checked){
   const allP=mode==='custom'?Object.values(customStocks):mode==='rocket'?rocketPicks:mode==='puts'?putPicks:mode==='squeeze'?squeezePicks:mode==='sp'?spPicks:ufPicks;
   const s=allP.find(x=>x.symbol===ticker);if(!s)return;
-  if(checked){trades[ticker]={entry:s._entry,time:new Date().toLocaleTimeString(),mode,status:'hold',pnl:'0.00',currentPrice:s._entry,lastCheck:'just opened'};showAlert(ticker,'Tracking · Entry $'+s._entry+' · Target $'+s._target+' · Stop $'+s._stop);startAutoRefresh();}
-  else delete trades[ticker];
+  if(checked){
+    trades[ticker]={entry:s._entry,time:new Date().toLocaleTimeString(),mode,status:'hold',pnl:'0.00',currentPrice:s._entry,lastCheck:'just opened'};
+    // Register on server for Telegram alerts even when browser is closed
+    const params=new URLSearchParams({symbol:ticker,entry:s._entry,target:s._target,stop:s._stop,mode,name:s.shortName||ticker});
+    fetch('/track?'+params,{method:'POST'}).catch(()=>{});
+    showAlert(ticker,'Server tracking ON · Telegram alerts active even if browser closed');
+    startAutoRefresh();
+  } else {
+    delete trades[ticker];
+    fetch('/track?symbol='+ticker,{method:'DELETE'}).catch(()=>{});
+  }
   if(mode==='custom')renderCustomSidebar();else if(mode==='rocket')renderRocketSidebar();else if(mode==='squeeze')renderSqueezeSidebar();else renderSidebar();
+  updateServerBadge();
   if(selTicker===ticker)selectStock(ticker,mode);
 }
 
@@ -801,8 +812,15 @@ function startAutoRefresh(){
   const d=document.getElementById('ref-dot');if(d)d.classList.add('live');
   document.getElementById('ref-txt').textContent='Auto ON';
 }
+function updateServerBadge(){
+  const b=document.getElementById('server-track-badge');
+  if(!b)return;
+  const n=Object.keys(trades).length;
+  if(n>0){b.style.display='';b.textContent='📡 '+n+' tracked';}
+  else b.style.display='none';
+}
 async function doRefresh(){
-  const allSyms=[...new Set([...spPicks.map(s=>s.symbol),...putPicks.map(s=>s.symbol),...ufPicks.map(s=>s.symbol),...rocketPicks.map(s=>s.symbol),...Object.keys(customStocks),...Object.keys(trades)])];
+  const allSyms=[...new Set([...spPicks.map(s=>s.symbol),...putPicks.map(s=>s.symbol),...ufPicks.map(s=>s.symbol),...rocketPicks.map(s=>s.symbol),...squeezePicks.map(s=>s.symbol),...Object.keys(customStocks),...Object.keys(trades)])];
   if(!allSyms.length)return;
   const d=document.getElementById('ref-dot');if(d)d.style.background='var(--amber)';
   const quotes=await priceFetch(allSyms);
@@ -822,11 +840,11 @@ async function doRefresh(){
     }
     if(!atEntry(s)) s._tgEntryFired=false; // reset when price moves away
   });
-  if(selMode==='custom')renderCustomSidebar();else if(selMode==='rocket')renderRocketSidebar();else renderSidebar();
+  if(selMode==='custom')renderCustomSidebar();else if(selMode==='rocket')renderRocketSidebar();else if(selMode==='squeeze')renderSqueezeSidebar();else renderSidebar();
   updateLivePrice();
   if(selTicker&&activeChart){
     if(currentRange==='1D'||currentRange==='1W'){const h2=await fetchHist(selTicker,RANGES[currentRange].period,RANGES[currentRange].interval);if(h2.length){activeChart.data.labels=h2.map(h=>h.date);activeChart.data.datasets[0].data=h2.map(h=>h.close);activeChart.update('none');}}
-    else{const allP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...Object.values(customStocks)],s=allP.find(x=>x.symbol===selTicker);if(s&&activeChart.data.datasets[0].data.length){const len=activeChart.data.datasets[0].data.length;activeChart.data.datasets[0].data[len-1]=s.regularMarketPrice;activeChart.update('none');}}
+    else{const allP=[...spPicks,...putPicks,...ufPicks,...rocketPicks,...squeezePicks,...Object.values(customStocks)],s=allP.find(x=>x.symbol===selTicker);if(s&&activeChart.data.datasets[0].data.length){const len=activeChart.data.datasets[0].data.length;activeChart.data.datasets[0].data[len-1]=s.regularMarketPrice;activeChart.update('none');}}
   }
   const ts=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'America/New_York'});
   document.getElementById('ref-txt').textContent='↻ '+ts+' ET';
