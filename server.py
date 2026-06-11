@@ -89,13 +89,34 @@ def send_telegram(msg):
 def score_bull(q):
     p=q.get('regularMarketPrice',0); hi=q.get('fiftyTwoWeekHigh',p) or p
     lo=q.get('fiftyTwoWeekLow',p*0.7) or p*0.7
-    chg=q.get('regularMarketChangePercent',0); vr=q.get('_vr',1)
-    mc=q.get('marketCap',0); rng=(p-lo)/((hi-lo) or 1)
+    chg=q.get('regularMarketChangePercent',0)
+    vr=q.get('_vr',1)
+    mc=q.get('marketCap',0)
+    rng=(p-lo)/((hi-lo) or 1)
     s=50
-    if chg>5:s+=25 elif chg>3:s+=19 elif chg>2:s+=14 elif chg>1:s+=9 elif chg>0:s+=4 elif chg<-3:s-=18 elif chg<-1:s-=8 else:s-=3
-    if vr>5:s+=25 elif vr>3:s+=18 elif vr>2:s+=12 elif vr>1.5:s+=7 elif vr>1:s+=3 else:s-=6
-    if rng>0.88:s+=20 elif rng>0.72:s+=13 elif rng>0.55:s+=7 elif rng>0.35:s+=3 else:s-=5
-    if mc>200e9:s+=10 elif mc>50e9:s+=7 elif mc>10e9:s+=4 elif mc>1e9:s+=2
+    if chg>5: s+=25
+    elif chg>3: s+=19
+    elif chg>2: s+=14
+    elif chg>1: s+=9
+    elif chg>0: s+=4
+    elif chg<-3: s-=18
+    elif chg<-1: s-=8
+    else: s-=3
+    if vr>5: s+=25
+    elif vr>3: s+=18
+    elif vr>2: s+=12
+    elif vr>1.5: s+=7
+    elif vr>1: s+=3
+    else: s-=6
+    if rng>0.88: s+=20
+    elif rng>0.72: s+=13
+    elif rng>0.55: s+=7
+    elif rng>0.35: s+=3
+    else: s-=5
+    if mc>200e9: s+=10
+    elif mc>50e9: s+=7
+    elif mc>10e9: s+=4
+    elif mc>1e9: s+=2
     return min(99,max(30,round(s)))
 
 def score_squeeze(q):
@@ -104,13 +125,32 @@ def score_squeeze(q):
     chg=q.get('regularMarketChangePercent',0); vr=q.get('_vr',1)
     short_pct=q.get('shortPercentOfFloat',0); float_sh=q.get('floatShares',0)
     short_ratio=q.get('shortRatio',0); s=50
-    if short_pct>40:s+=30 elif short_pct>25:s+=23 elif short_pct>15:s+=16 elif short_pct>8:s+=9 elif short_pct>3:s+=4
+    if short_pct>40: s+=30
+    elif short_pct>25: s+=23
+    elif short_pct>15: s+=16
+    elif short_pct>8: s+=9
+    elif short_pct>3: s+=4
     if float_sh>0:
-        if float_sh<2e6:s+=25 elif float_sh<5e6:s+=20 elif float_sh<10e6:s+=14 elif float_sh<20e6:s+=8 elif float_sh<50e6:s+=3 else:s-=8
-    if vr>15:s+=20 elif vr>8:s+=15 elif vr>5:s+=10 elif vr>3:s+=6 elif vr>2:s+=3 else:s-=8
-    if chg>15:s+=15 elif chg>8:s+=11 elif chg>4:s+=7 elif chg>1:s+=3 elif chg<-5:s-=10
-    if short_ratio>5:s+=8 elif short_ratio>3:s+=4
-    if 1<=p<=15:s+=5
+        if float_sh<2e6: s+=25
+        elif float_sh<5e6: s+=20
+        elif float_sh<10e6: s+=14
+        elif float_sh<20e6: s+=8
+        elif float_sh<50e6: s+=3
+        else: s-=8
+    if vr>15: s+=20
+    elif vr>8: s+=15
+    elif vr>5: s+=10
+    elif vr>3: s+=6
+    elif vr>2: s+=3
+    else: s-=8
+    if chg>15: s+=15
+    elif chg>8: s+=11
+    elif chg>4: s+=7
+    elif chg>1: s+=3
+    elif chg<-5: s-=10
+    if short_ratio>5: s+=8
+    elif short_ratio>3: s+=4
+    if 1<=p<=15: s+=5
     return min(99,max(0,round(s)))
 
 def week_signal(q):
@@ -118,9 +158,22 @@ def week_signal(q):
     p=q.get('regularMarketPrice',0); hi=q.get('fiftyTwoWeekHigh',p) or p
     lo=q.get('fiftyTwoWeekLow',p*0.7) or p*0.7
     rng=(p-lo)/((hi-lo) or 1); bull=0; bear=0
-    if chg>4:bull+=4 elif chg>2:bull+=3 elif chg>1:bull+=2 elif chg>0:bull+=1 elif chg<-4:bear+=4 elif chg<-2:bear+=3 elif chg<-1:bear+=2 elif chg<0:bear+=1
-    if vr>2 and chg>0:bull+=2 elif vr>2 and chg<0:bear+=2 elif vr>1.5:bull+=1
-    if rng>0.80:bull+=3 elif rng>0.60:bull+=2 elif rng>0.40:bull+=1 elif rng<0.20:bear+=3 elif rng<0.40:bear+=2
+    if chg>4: bull+=4
+    elif chg>2: bull+=3
+    elif chg>1: bull+=2
+    elif chg>0: bull+=1
+    elif chg<-4: bear+=4
+    elif chg<-2: bear+=3
+    elif chg<-1: bear+=2
+    elif chg<0: bear+=1
+    if vr>2 and chg>0: bull+=2
+    elif vr>2 and chg<0: bear+=2
+    elif vr>1.5: bull+=1
+    if rng>0.80: bull+=3
+    elif rng>0.60: bull+=2
+    elif rng>0.40: bull+=1
+    elif rng<0.20: bear+=3
+    elif rng<0.40: bear+=2
     d=bull-bear
     if d>=4: return '📈 BULL WEEK'
     if d<=-4: return '📉 BEAR WEEK'
@@ -343,7 +396,8 @@ def job_morning_scan():
     send_telegram(
         "🌅 Good morning! Options Scanner starting morning scan...\n"
         f"⏰ {datetime.now(ET_TZ).strftime('%A, %b %d %Y')}\n"
-        "Results will follow in ~3 minutes"
+        "Results will follow in ~3 minutes\n"
+        f"Dashboard: {APP_URL}/autotrade"
     )
     try:
         quotes = get_quotes(SP500_LIST[:20])  # Top 20 for speed
@@ -483,6 +537,9 @@ def job_keepalive():
 def index(): return send_from_directory('.','scanner.html')
 @app.route('/scanner.html')
 def scanner_html(): return send_from_directory('.','scanner.html')
+
+@app.route('/autotrade')
+def autotrade(): return send_from_directory('.','autotrade.html')
 @app.route('/ping')
 def ping(): return cors({"ok":True,"time":datetime.now(ET_TZ).strftime('%H:%M:%S ET')})
 @app.route('/status')
@@ -629,6 +686,17 @@ def start_scheduler():
                   hour='9-15',minute='*/2')
     # Self-keepalive every 10 min (prevents Render sleep during market)
     sched.add_job(job_keepalive,'interval',minutes=10)
+
+    # ── PAPER TRADING JOBS ──
+    # Morning pick at 8:00 AM ET Mon-Fri
+    sched.add_job(job_paper_morning_pick,'cron',day_of_week='mon-fri',hour=8,minute=0)
+    # Enter at market open 9:30 AM if not already in
+    sched.add_job(job_paper_market_open,'cron',day_of_week='mon-fri',hour=9,minute=30)
+    # Monitor every 2 min during extended hours (8 AM - 4:30 PM)
+    sched.add_job(job_paper_monitor,'cron',day_of_week='mon-fri',hour='8-16',minute='*/2')
+    # EOD close and report at 3:55 PM
+    sched.add_job(job_paper_eod,'cron',day_of_week='mon-fri',hour=15,minute=55)
+
     sched.start()
     print(f"  Scheduler started — {len(sched.get_jobs())} jobs")
     return sched
@@ -648,3 +716,353 @@ if __name__=='__main__':
     print("==========================================")
     print(f"  Telegram: {'✅ configured' if TELEGRAM_TOKEN else '❌ not set'}")
     app.run(host='0.0.0.0',port=PORT,debug=False)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAPER TRADING ENGINE
+# Simulates 3 trades per day: Trade1=10% target, Trade2&3=5% target
+# Budget: $10,000 rolling (profit compounds into next trade)
+# Stop loss: -3% on all trades
+# ══════════════════════════════════════════════════════════════════════
+
+PAPER_WATCHLIST = [
+    'MU','NVDA','AMD','SMCI','TSLA','META','GOOGL','MSFT',
+    'AAPL','AMZN','AVGO','COIN','PLTR','ARM','NFLX','UBER',
+    'CRM','NOW','CRWD','PANW','MSTR','HOOD','SOFI','APP'
+]
+
+# In-memory paper trading state (resets on server restart)
+paper = {
+    'capital':         10000.0,   # current available capital
+    'starting_capital':10000.0,   # day's starting capital
+    'trade_num':       1,         # current trade number (1,2,3)
+    'active':          None,      # current open trade dict
+    'completed':       [],        # list of completed trades today
+    'targets':         [0.10, 0.05, 0.05],  # per-trade profit targets
+    'stop_pct':        0.03,      # 3% stop loss
+    'status':          'waiting', # waiting | picked | entered | done
+    'picked_stock':    None,      # stock selected but not yet entered
+    'date':            None,      # trading date (reset daily)
+    'total_pnl':       0.0,       # cumulative P&L today
+    'slippage':        0.001,     # 0.1% simulated slippage
+}
+
+def paper_reset():
+    """Reset paper trading for a new day"""
+    paper.update({
+        'capital': 10000.0, 'starting_capital': 10000.0,
+        'trade_num': 1, 'active': None, 'completed': [],
+        'status': 'waiting', 'picked_stock': None,
+        'date': datetime.now(ET_TZ).date().isoformat(),
+        'total_pnl': 0.0,
+    })
+    print("  Paper trading reset for new day")
+
+def paper_pick_stock():
+    """Score and select best stock for next trade"""
+    try:
+        quotes = get_quotes(PAPER_WATCHLIST[:15])  # limit for speed
+        # Filter: must be tradeable (price > $5, market cap > $5B)
+        eligible = [q for q in quotes
+                    if q.get('regularMarketPrice',0) > 5
+                    and q.get('marketCap',0) > 5e9]
+        # Skip already traded today
+        already = [t['symbol'] for t in paper['completed']]
+        eligible = [q for q in eligible if q['symbol'] not in already]
+        if not eligible: return None
+        # Score and pick best
+        scored = sorted(eligible, key=lambda q: score_bull(q), reverse=True)
+        return scored[0] if scored else None
+    except Exception as e:
+        print(f"  Paper pick error: {e}")
+        return None
+
+def fmt_pnl(pnl, pct):
+    return f"{'✅ +' if pnl>=0 else '🔴 '}${abs(pnl):,.2f} ({'+' if pct>=0 else ''}{pct:.2f}%)"
+
+def paper_notify_pick(q):
+    trade_num = paper['trade_num']
+    target_pct = paper['targets'][trade_num-1] * 100
+    price = q['regularMarketPrice']
+    capital = paper['capital']
+    shares = int(capital * (1 - paper['slippage']) / price)
+    entry_cost = shares * price
+    target_price = round(price * (1 + paper['targets'][trade_num-1]), 2)
+    stop_price   = round(price * (1 - paper['stop_pct']), 2)
+    ws = week_signal(q)
+    chg = q.get('regularMarketChangePercent', 0)
+    pre = q.get('preMarketPrice', 0)
+    pre_note = f"\n   Pre-market: ${pre:.2f}" if pre > 0 else ""
+
+    send_telegram(
+        f"🔍 TRADE {trade_num} PICKED\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Stock:    {q['symbol']} — {q.get('shortName',q['symbol'])}\n"
+        f"Price:    ${price:.2f} ({chg:+.2f}% today){pre_note}\n"
+        f"Signal:   {ws} | Score {score_bull(q)}/100\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Capital:  ${capital:,.2f}\n"
+        f"Shares:   {shares} @ ${price:.2f} = ${entry_cost:,.2f}\n"
+        f"Target:   ${target_price} (+{target_pct:.0f}%)\n"
+        f"Stop:     ${stop_price} (-{paper['stop_pct']*100:.0f}%)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Entering at market open 9:30 AM ET"
+    )
+
+def paper_enter_trade(q, price=None):
+    """Simulate entering the trade"""
+    if not q: return
+    entry_price = price or q['regularMarketPrice']
+    # Apply slippage (buy slightly higher)
+    entry_price = round(entry_price * (1 + paper['slippage']), 4)
+    trade_num   = paper['trade_num']
+    capital     = paper['capital']
+    shares      = int(capital / entry_price)
+    if shares < 1: return
+    cost        = shares * entry_price
+    target_pct  = paper['targets'][trade_num-1]
+    target_price= round(entry_price * (1 + target_pct), 2)
+    stop_price  = round(entry_price * (1 - paper['stop_pct']), 2)
+
+    paper['active'] = {
+        'symbol':       q['symbol'],
+        'name':         q.get('shortName', q['symbol']),
+        'trade_num':    trade_num,
+        'shares':       shares,
+        'entry':        entry_price,
+        'cost':         cost,
+        'target':       target_price,
+        'stop':         stop_price,
+        'target_pct':   target_pct,
+        'entry_time':   datetime.now(ET_TZ).strftime('%H:%M ET'),
+        'peak_price':   entry_price,
+        'current':      entry_price,
+    }
+    paper['status'] = 'entered'
+
+    send_telegram(
+        f"📈 TRADE {trade_num} ENTERED\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Stock:   {q['symbol']}\n"
+        f"Bought:  {shares} shares @ ${entry_price:.2f}\n"
+        f"Cost:    ${cost:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Target:  ${target_price} (+{target_pct*100:.0f}%)\n"
+        f"Stop:    ${stop_price} (-{paper['stop_pct']*100:.0f}%)\n"
+        f"Time:    {paper['active']['entry_time']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Monitoring every 2 min. Will alert on target/stop."
+    )
+
+def paper_close_trade(current_price, reason='target'):
+    """Close active trade and record result"""
+    t = paper['active']
+    if not t: return
+    # Apply slippage on sell (sell slightly lower)
+    sell_price = round(current_price * (1 - paper['slippage']), 4)
+    pnl        = (sell_price - t['entry']) * t['shares']
+    pnl_pct    = (sell_price - t['entry']) / t['entry'] * 100
+    proceeds   = sell_price * t['shares']
+
+    trade_record = {**t, 'exit': sell_price, 'pnl': pnl,
+                    'pnl_pct': pnl_pct, 'reason': reason,
+                    'exit_time': datetime.now(ET_TZ).strftime('%H:%M ET')}
+    paper['completed'].append(trade_record)
+    paper['total_pnl'] += pnl
+    paper['capital']   = proceeds  # roll proceeds into next trade
+    paper['active']    = None
+
+    icon  = '💰' if reason=='target' else ('🛑' if reason=='stop' else '🔔')
+    rtext = ('TARGET HIT' if reason=='target' else
+             'STOP LOSS'  if reason=='stop'   else 'EOD CLOSE')
+
+    msg = (
+        f"{icon} TRADE {t['trade_num']} CLOSED — {rtext}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Stock:   {t['symbol']}\n"
+        f"Sold:    {t['shares']} shares @ ${sell_price:.2f}\n"
+        f"Entry:   ${t['entry']:.2f} | Exit: ${sell_price:.2f}\n"
+        f"P&L:     {fmt_pnl(pnl, pnl_pct)}\n"
+        f"Capital: ${proceeds:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total today: {fmt_pnl(paper['total_pnl'], paper['total_pnl']/paper['starting_capital']*100)}"
+    )
+    send_telegram(msg)
+
+    # Move to next trade if < 3 trades done
+    next_num = paper['trade_num'] + 1
+    if next_num <= 3 and is_market_hours():
+        paper['trade_num'] = next_num
+        paper['status'] = 'waiting'
+        send_telegram(
+            f"🔍 Looking for Trade {next_num} "
+            f"(target +{paper['targets'][next_num-1]*100:.0f}%)..."
+        )
+        # Immediately try to pick and enter next trade
+        job_paper_pick_and_enter()
+    else:
+        paper['status'] = 'done'
+        if next_num > 3:
+            send_telegram("✅ All 3 trades complete for today! Check EOD report at 3:55 PM.")
+
+def job_paper_morning_pick():
+    """8:00 AM ET — Pick Trade 1 and notify"""
+    if not is_trading_day(): return
+    paper_reset()
+    paper['date'] = datetime.now(ET_TZ).date().isoformat()
+    print("  Paper: Morning pick starting...")
+    send_telegram(
+        f"🌅 PAPER TRADING DAY STARTING\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Date:      {datetime.now(ET_TZ).strftime('%A, %b %d %Y')}\n"
+        f"Capital:   $10,000.00\n"
+        f"Strategy:  Trade 1: +10% | Trade 2: +5% | Trade 3: +5%\n"
+        f"Stop loss: -3% on all trades\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Scanning for Trade 1 pick..."
+    )
+    q = paper_pick_stock()
+    if q:
+        paper['picked_stock'] = q
+        paper['status'] = 'picked'
+        paper_notify_pick(q)
+        # Check pre-market — enter early if gapping strongly
+        pre = q.get('preMarketPrice', 0)
+        price = q.get('regularMarketPrice', 0)
+        if pre > 0 and pre > price * 1.005:
+            send_telegram(
+                f"⚡ Pre-market gap detected on {q['symbol']}: ${pre:.2f}\n"
+                f"Entering pre-market for better fill..."
+            )
+            paper_enter_trade(q, pre)
+    else:
+        send_telegram("⚠️ No suitable stock found for Trade 1. Will retry at 9:30 AM.")
+
+def job_paper_pick_and_enter():
+    """Pick and immediately enter the next trade (used for Trade 2 & 3)"""
+    q = paper_pick_stock()
+    if not q:
+        send_telegram("⚠️ No suitable stock found for next trade.")
+        return
+    paper['picked_stock'] = q
+    paper['status'] = 'picked'
+    paper_notify_pick(q)
+    import time as _t; _t.sleep(3)  # brief pause before entering
+    paper_enter_trade(q)
+
+def job_paper_market_open():
+    """9:30 AM — Enter if not already in a trade"""
+    if not is_trading_day(): return
+    if paper['status'] == 'picked' and not paper['active']:
+        q = paper['picked_stock']
+        if q:
+            send_telegram(f"🔔 Market open — entering {q['symbol']} now")
+            # Get fresh price at open
+            fresh = get_fast_prices([q['symbol']])
+            open_price = fresh[0]['regularMarketPrice'] if fresh else None
+            paper_enter_trade(q, open_price)
+    elif paper['status'] == 'waiting' and paper['trade_num'] == 1:
+        # Missed morning pick — try now
+        q = paper_pick_stock()
+        if q:
+            paper['picked_stock'] = q
+            paper['status'] = 'picked'
+            paper_notify_pick(q)
+            paper_enter_trade(q)
+
+def job_paper_monitor():
+    """Every 2 min during market hours — check active paper trade"""
+    if not paper['active'] or not is_market_hours(): return
+    t = paper['active']
+    sym = t['symbol']
+    try:
+        fresh = get_fast_prices([sym])
+        if not fresh: return
+        price = fresh[0]['regularMarketPrice']
+        paper['active']['current'] = price
+        paper['active']['peak_price'] = max(price, t.get('peak_price', price))
+        pnl_pct = (price - t['entry']) / t['entry'] * 100
+
+        # Target hit
+        if price >= t['target']:
+            paper_close_trade(price, 'target')
+        # Stop loss hit
+        elif price <= t['stop']:
+            paper_close_trade(price, 'stop')
+        # Progress update every 30 min (avoid spam)
+        elif datetime.now(ET_TZ).minute % 30 == 0:
+            send_telegram(
+                f"📊 Trade {t['trade_num']} Update — {sym}\n"
+                f"Entry: ${t['entry']:.2f} | Now: ${price:.2f}\n"
+                f"P&L: {fmt_pnl((price-t['entry'])*t['shares'], pnl_pct)}\n"
+                f"Target: ${t['target']} | Stop: ${t['stop']}"
+            )
+    except Exception as e:
+        print(f"  Paper monitor error: {e}")
+
+def job_paper_eod():
+    """3:55 PM — Force close all and send daily report"""
+    if not is_trading_day(): return
+    # Close active trade if any
+    if paper['active']:
+        sym = paper['active']['symbol']
+        fresh = get_fast_prices([sym])
+        price = fresh[0]['regularMarketPrice'] if fresh else paper['active']['current']
+        paper_close_trade(price, 'eod')
+    # Build report
+    total_pnl  = paper['total_pnl']
+    start      = paper['starting_capital']
+    pnl_pct    = total_pnl / start * 100
+    lines = [
+        "📊 END OF DAY REPORT",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"Date:     {datetime.now(ET_TZ).strftime('%A, %b %d %Y')}",
+        f"Start:    ${start:,.2f}",
+        f"End:      ${paper['capital']:,.2f}",
+        f"Total P&L: {fmt_pnl(total_pnl, pnl_pct)}",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for t in paper['completed']:
+        icon = '✅' if t['pnl'] >= 0 else '🔴'
+        lines.append(
+            f"{icon} Trade {t['trade_num']}: {t['symbol']}\n"
+            f"   Entry ${t['entry']:.2f} → Exit ${t['exit']:.2f}\n"
+            f"   {fmt_pnl(t['pnl'], t['pnl_pct'])} ({t['reason'].upper()})\n"
+            f"   {t['entry_time']} → {t['exit_time']}"
+        )
+    if not paper['completed']:
+        lines.append("No trades completed today.")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"See you tomorrow at 8 AM! {APP_URL}")
+    send_telegram('\n'.join(lines))
+    paper['status'] = 'done'
+    print("  Paper: EOD report sent")
+
+# ── PAPER TRADING FLASK ROUTES ─────────────────────────────────────────
+@app.route('/paper-status')
+def paper_status():
+    return cors({
+        "ok": True,
+        "date": paper['date'],
+        "status": paper['status'],
+        "trade_num": paper['trade_num'],
+        "capital": paper['capital'],
+        "starting_capital": paper['starting_capital'],
+        "total_pnl": round(paper['total_pnl'], 2),
+        "total_pnl_pct": round(paper['total_pnl'] / paper['starting_capital'] * 100, 2) if paper['starting_capital'] else 0,
+        "active_trade": paper['active'],
+        "completed_trades": paper['completed'],
+    })
+
+@app.route('/paper-reset')
+def paper_reset_route():
+    paper_reset()
+    return cors({"ok": True, "msg": "Paper trading reset"})
+
+@app.route('/paper-force-pick')
+def paper_force_pick():
+    """Manually trigger a pick (for testing)"""
+    paper_reset()
+    job_paper_morning_pick()
+    return cors({"ok": True, "msg": "Morning pick triggered"})
+
