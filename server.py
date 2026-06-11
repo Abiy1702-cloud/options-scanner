@@ -619,10 +619,14 @@ def job_eod():
     tg('\n'.join(lines))
 
 def job_keepalive():
-    if not is_market_open(): return
+    now = datetime.now(ET_TZ)
+    if now.weekday() >= 5: return  # skip weekends
+    t = now.hour * 60 + now.minute
+    if t < 7*60 or t > 17*60: return  # only 7 AM - 5 PM ET
     try:
         urllib.request.urlopen(urllib.request.Request(
             f"{APP_URL}/ping", headers={'User-Agent':UA}), timeout=8)
+        print(f"  Keepalive ping OK at {now_et()}")
     except: pass
 
 # ── News ──────────────────────────────────────────────────────────────
