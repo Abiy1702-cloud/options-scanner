@@ -4,3 +4,4 @@ yfinance
 pandas
 APScheduler
 pytz
+alpaca-py
