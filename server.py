@@ -842,6 +842,37 @@ def test_telegram():
     ok=tg(f"✅ AutoTrade Pro Connected!\nAlpaca: {'✅' if alpaca_trading else '❌'} | AI Chat: {'✅' if ANTHROPIC_KEY else '❌'}\nDashboard: {APP_URL}")
     return cors({'ok':ok,'msg':'Sent! Check Telegram.' if ok else 'Failed.'})
 
+
+@app.route('/et-news')
+def et_news():
+    """Ethiopian Reporter news via Google News RSS"""
+    items = []
+    urls = [
+        'https://news.google.com/rss/search?q=site:ethiopianreporter.com&hl=en&gl=ET&ceid=ET:en',
+        'https://news.google.com/rss/search?q=ethiopianreporter.com&hl=en&gl=ET',
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': UA})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                tree = ET.fromstring(r.read())
+                for item in tree.iter('item'):
+                    title_el = item.find('title')
+                    link_el  = item.find('link')
+                    date_el  = item.find('pubDate')
+                    if title_el is not None and title_el.text and len(title_el.text.strip()) > 10:
+                        title = title_el.text.strip()
+                        # Remove " - Ethiopian Reporter" suffix if present
+                        if ' - ' in title:
+                            title = title.rsplit(' - ', 1)[0].strip()
+                        link = link_el.text.strip() if link_el is not None and link_el.text else ''
+                        date = date_el.text.strip() if date_el is not None and date_el.text else ''
+                        items.append({'title': title, 'link': link, 'date': date})
+            if items: break
+        except Exception as e:
+            print(f"  ET news error: {e}")
+    return cors({'items': items[:20], 'count': len(items)})
+
 @app.route('/notify')
 def notify():
     msg=request.args.get('msg','')
