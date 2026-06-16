@@ -62,6 +62,21 @@ UNIVERSE = {
     # ── 100%+ candidates: ETFs/stocks that can double ────────────────
     # DRAM, NVDL, SOXL, MSTR, SMCI have ALL doubled in recent runs
     '100x_candidates': ['DRAM','NVDL','FNGU','MSTR','SMCI','RGTI','IONQ','BBAI','SOUN','ASTS'],
+
+    # ── Biotech: binary catalysts (FDA, trial data) cause 10-50% gaps ──
+    'biotech_volatile': ['MRNA','NVAX','CRSP','NTLA','SAVA'],
+
+    # ── China ADRs: notoriously volatile on regulatory/economic news ──
+    'china_adr': ['BABA','NIO','XPEV','LI','PDD'],
+
+    # ── EV/clean energy: high-beta, sentiment-driven ──────────────────
+    'ev_clean': ['RIVN','LCID','CHPT','PLUG','FCEL'],
+
+    # ── More semiconductors beyond the AI-flagship names ──────────────
+    'more_semis': ['MU','LRCX','AMAT','MRVL'],
+
+    # ── Meme/retail-driven volatility ──────────────────────────────────
+    'meme_volatile': ['GME','AMC'],
 }
 ALL_UNIVERSE = [s for group in UNIVERSE.values() for s in group]
 
@@ -551,17 +566,33 @@ def close_trade(sym, reason='target'):
         if nxt>RULES['MAX_TRADES_PER_DAY']:
             tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{APP_URL}")
 
+_pick_lock = threading.Lock()
+_picking_now = False
+
 def _auto_pick_enter():
-    time.sleep(5)
-    ok, reason = can_enter()
-    if not ok:
-        p_log(f"Auto-pick skipped: {reason}"); return
-    spy=cp('SPY'); qqq=cp('QQQ')
-    q=pick_best(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0)
-    if not q:
-        tg(f"⚠️ No stock meets standards (score≥{RULES['MIN_SCORE']}, vol≥{RULES['MIN_VOLUME_RATIO']}x). Watching..."); return
-    paper['picked']=q; paper['status']='picked'
-    _notify_pick(q); time.sleep(3); enter_trade(q)
+    global _picking_now, _last_no_setup_notify
+    with _pick_lock:
+        if _picking_now:
+            return  # already scanning in another thread — don't overlap
+        _picking_now = True
+    try:
+        time.sleep(3)
+        ok, reason = can_enter()
+        if not ok:
+            p_log(f"Auto-pick skipped: {reason}"); return
+        spy=cp('SPY'); qqq=cp('QQQ')
+        q=pick_best(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0)
+        if not q:
+            p_log(f"No qualifying stock yet (score≥{RULES['MIN_SCORE']}, vol≥{RULES['MIN_VOLUME_RATIO']}x) — will keep scanning every minute")
+            if time.time() - _last_no_setup_notify > 600:  # at most once every 10 min
+                tg(f"⚠️ Still scanning — no stock meets standards yet (score≥{RULES['MIN_SCORE']}, vol≥{RULES['MIN_VOLUME_RATIO']}x). Will keep checking every minute automatically — no need to Force Pick.")
+                _last_no_setup_notify = time.time()
+            paper['status'] = 'waiting'
+            return
+        paper['picked']=q; paper['status']='picked'
+        _notify_pick(q); time.sleep(3); enter_trade(q)
+    finally:
+        _picking_now = False
 
 def _notify_pick(q):
     tnum=paper['trade_seq']; tp=RULES['TARGET_PCT']*100
@@ -705,8 +736,20 @@ def check_symbol_news(symbol):
 
 _last_rotate_check = 0
 
+_last_no_setup_notify = 0
+
 def job_monitor():
-    if not paper['active']: return
+    if not paper['active']:
+        # No trade open — keep retrying instead of sitting idle. This was the bug:
+        # if 9:45's scan came up empty, nothing ever tried again until you
+        # manually clicked Force Pick.
+        if paper['status'] in ('waiting', 'picked') and is_trading_day():
+            ok, reason = can_enter()
+            if ok:
+                threading.Thread(target=_auto_pick_enter, daemon=True).start()
+            elif 'Max trades' in reason or 'closed' in reason:
+                pass  # nothing to do, day is over or capped
+        return
     if alpaca_trading:
         try:
             pos={p.symbol:p for p in alpaca_trading.get_all_positions()}
