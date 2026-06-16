@@ -70,14 +70,30 @@ custom_watchlist = []
 
 # ── PROFESSIONAL TRADING RULES ────────────────────────────────────────
 RULES = {
-    'MIN_SCORE':          60,    # Minimum score/99 — reject weak setups
-    'MIN_VOLUME_RATIO':   1.2,   # Need 1.2x avg volume (institutional buying)
+    'MIN_SCORE':          58,    # Minimum score/99 — reject weak setups
+    'MIN_VOLUME_RATIO':   1.15,  # Need 1.15x avg volume (institutional buying)
+    'TARGET_PCT':          0.08, # 8% profit ceiling — take it if you hit it
     'STOP_PCT':           0.04,  # 4% stop — 3% too tight for volatile names
+    'TRAIL_TRIGGER_PCT':  0.03,  # Once up 3%+, start trailing the peak
+    'TRAIL_GIVEBACK_PCT': 0.02,  # If price gives back 2pts from peak gain, exit
     'NO_ENTRY_BEFORE':    (9,45),# Never enter first 15min — pure chaos
     'NO_ENTRY_AFTER':     (14,30),# No new trades after 2:30PM
     'MIN_SPY_PCT':        -0.5,  # Don't fight a crashing market
-    'PREFER_3X_ETF':      True,  # When in doubt, 3x ETF beats single stock
+    'MAX_TRADES_PER_DAY': 8,     # Rotate through many trades, don't cap at 3
+    'UNDERPERFORM_MINUTES':   60,  # After 60 min with little movement...
+    'UNDERPERFORM_MIN_PCT':   1.5, # ...and gain is under 1.5%...
+    'UNDERPERFORM_SCORE_GAP': 15,  # ...rotate if a candidate scores 15+ higher
 }
+# Simulated options tracker config (educational estimate, NOT real option data)
+OPTIONS_MAX_SLOTS   = 3
+OPTIONS_LEVERAGE    = 5      # Approximate leverage of an ATM short-dated option
+OPTIONS_TARGET_PCT  = 0.35   # Simulated option-level take-profit
+OPTIONS_STOP_PCT    = 0.25   # Simulated option-level stop
+# Bad-news keywords that trigger an immediate exit of an ACTIVE position
+BAD_STOCK_KEYWORDS = ['downgrade','lawsuit','recall','investigation','plunge',
+    'sell-off','selloff','miss estimates','misses estimates','cuts guidance',
+    'fraud','bankruptcy','delisted','halted','sec probe','short report',
+    'accounting','class action','subpoena','resigns','ceo steps down']
 
 # ── PRICE CACHE ───────────────────────────────────────────────────────
 _prices    = {}
@@ -330,13 +346,15 @@ def get_hold_signal(t):
 def get_full_quotes(symbols):
     results = []
     try:
-        batch = [s for s in symbols if s][:20]
+        # No truncation — scan the FULL universe every time. This is what
+        # was silently capping scans to 20 random stocks and missing movers.
+        batch = list(dict.fromkeys([s for s in symbols if s]))
         df5  = yf.download(batch, period='5d', interval='1d', auto_adjust=True, progress=False)
         df1y = yf.download(batch, period='1y', interval='1d', auto_adjust=True, progress=False)
         def fi(s):
             try: return s, yf.Ticker(s).info or {}
             except: return s, {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
             info_map = dict(ex.map(fi, batch))
         multi = isinstance(df5.columns, pd.MultiIndex)
         for sym in batch:
@@ -368,18 +386,35 @@ def get_full_quotes(symbols):
         print(f"  Quotes: {e}")
     return results
 
+_quotes_cache = {'data':{}, 'ts':0}
+QUOTES_TTL = 45  # seconds — long enough to avoid hammering yfinance on rapid rotation
+
+def get_full_quotes_cached(symbols):
+    now = time.time()
+    if now - _quotes_cache['ts'] < QUOTES_TTL and _quotes_cache['data']:
+        return list(_quotes_cache['data'].values())
+    fresh = get_full_quotes(symbols)
+    _quotes_cache['data'] = {q['symbol']: q for q in fresh}
+    _quotes_cache['ts'] = now
+    return fresh
+
 # ── PAPER TRADING ─────────────────────────────────────────────────────
 paper = {
     'capital':10000.0,'starting_capital':10000.0,'trade_seq':1,
-    'targets':[0.10,0.05,0.05],'stop_pct':RULES['STOP_PCT'],
+    'stop_pct':RULES['STOP_PCT'],
     'active':{},'completed':[],'total_pnl':0.0,
     'status':'waiting','picked':None,'date':None,'log':[],
-    'candidates':[],'better_opp':None,'skipped':[],
+    'candidates':[],'better_opp':None,'skipped':[],'trade_alert':None,
 }
 
 def p_log(msg):
     ts=now_et(); paper['log'].insert(0,{'time':ts,'msg':msg})
     paper['log']=paper['log'][:40]; print(f"  [{ts}] {msg}")
+
+# ── SIMULATED OPTIONS CANDIDATES TRACKER ───────────────────────────────
+# Educational estimate only — NOT real options data or a real options fill.
+# Approximates an option's P&L as (underlying % move) x OPTIONS_LEVERAGE.
+options_tracker = {'candidates': [], 'completed': []}
 
 def paper_reset():
     if alpaca_trading:
@@ -389,14 +424,17 @@ def paper_reset():
         'capital':10000.0,'starting_capital':10000.0,'trade_seq':1,
         'active':{},'completed':[],'total_pnl':0.0,'status':'waiting',
         'picked':None,'date':datetime.now(ET_TZ).date().isoformat(),
-        'log':[],'candidates':[],'better_opp':None,'skipped':[]
+        'log':[],'candidates':[],'better_opp':None,'skipped':[],'trade_alert':None,
     })
+    options_tracker['candidates'] = []
+    options_tracker['completed'] = []
 
-def pick_best(spy_pct=0, qqq_pct=0, force=False):
-    already = [t['symbol'] for t in paper['completed']] + paper.get('skipped',[])
-    # Use all universe + custom watchlist
-    watchlist = list(set(ALL_UNIVERSE + custom_watchlist))
-    quotes = get_full_quotes(watchlist)
+def pick_best(spy_pct=0, qqq_pct=0, force=False, exclude=None):
+    already = set([t['symbol'] for t in paper['completed']] + paper.get('skipped',[]))
+    if exclude: already |= set(exclude)
+    # Deterministic order (no random set sampling) — full universe every time
+    watchlist = list(dict.fromkeys(ALL_UNIVERSE + custom_watchlist))
+    quotes = get_full_quotes_cached(watchlist)
     scored = []
     for q in quotes:
         if q['symbol'] in already: continue
@@ -433,7 +471,7 @@ def enter_trade(q, manual=False):
     if shrs < 1:
         p_log(f"Not enough capital for {q['symbol']} @ ${ep}"); return False
 
-    tp    = paper['targets'][tnum-1]
+    tp    = RULES['TARGET_PCT']
     stop  = RULES['STOP_PCT']
     trade = {
         'symbol':q['symbol'],'name':q.get('shortName',q['symbol']),
@@ -441,6 +479,7 @@ def enter_trade(q, manual=False):
         'cost':round(shrs*ep,2),'target':round(ep*(1+tp),2),
         'stop':round(ep*(1-stop),2),'target_pct':tp,
         'entry_time':now_et(),'current':round(ep,2),'peak':round(ep,2),
+        'peak_pnl_pct':0.0,'entered_at':time.time(),
         'score':q.get('_score',0),'manual':manual,
         'via_alpaca':alpaca_trading is not None,
     }
@@ -486,9 +525,13 @@ def close_trade(sym, reason='target'):
     paper['completed'].append({**t,'exit':sell,'exit_time':now_et(),
                                 'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
     paper['total_pnl'] += pnl; paper['capital'] = proceeds
-    p_log(f"CLOSED {sym} {reason.upper()} P&L ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+    reason_label = {'target':'TARGET','stop':'STOP','momentum_stall':'MOMENTUM STALL',
+                     'rotate_better':'ROTATING','news_exit':'NEWS EXIT','eod':'EOD',
+                     'manual':'MANUAL'}.get(reason, reason.upper())
+    p_log(f"CLOSED {sym} {reason_label} P&L ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+    icon = '💰' if reason=='target' else '🛑' if reason in ('stop','news_exit') else '🔄' if reason in ('momentum_stall','rotate_better') else '🔔'
     tg(
-        f"{'💰'if reason=='target'else'🛑'if reason=='stop'else'🔔'} T{t['trade_num']} CLOSED — {reason.upper()}\n"
+        f"{icon} T{t['trade_num']} CLOSED — {reason_label}\n"
         f"{'━'*22}\n{sym}: {t['shares']}sh\n"
         f"Entry ${t['entry']:.2f} → Exit ${sell:.2f}\n"
         f"P&L: {'✅ +' if pnl>=0 else '🔴 '}${abs(pnl):.2f} ({pnl_pct:+.2f}%)\n"
@@ -496,14 +539,17 @@ def close_trade(sym, reason='target'):
         f"Total: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}"
     )
     nxt = paper['trade_seq']+1
-    if nxt<=3 and is_market_open():
+    can_rotate, _ = can_enter()
+    if nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open() and can_rotate:
         paper['trade_seq']=nxt; paper['status']='waiting'
-        tg(f"🔍 T{nxt}/3 starting (+{paper['targets'][nxt-1]*100:.0f}% target)...")
+        tg(f"🔍 Trade {nxt}/{RULES['MAX_TRADES_PER_DAY']} — scanning for next setup...")
         threading.Thread(target=_auto_pick_enter, daemon=True).start()
+    elif nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open():
+        paper['status']='waiting'  # market open but past cutoff time — will retry via job_monitor
     else:
         paper['status']='done'
-        if nxt>3:
-            tg(f"✅ All 3 trades done!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{APP_URL}")
+        if nxt>RULES['MAX_TRADES_PER_DAY']:
+            tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{APP_URL}")
 
 def _auto_pick_enter():
     time.sleep(5)
@@ -518,24 +564,81 @@ def _auto_pick_enter():
     _notify_pick(q); time.sleep(3); enter_trade(q)
 
 def _notify_pick(q):
-    tnum=paper['trade_seq']; tp=paper['targets'][tnum-1]*100
+    tnum=paper['trade_seq']; tp=RULES['TARGET_PCT']*100
     cached=cp(q['symbol']); price=cached['price'] if cached else q['regularMarketPrice']
     shrs=int(paper['capital']/price) if price else 0
     top3=paper.get('candidates',[])[:3]
     alts='\n'.join(f"  #{i+1} {c['symbol']} score={c['_score']}/99 chg={c.get('regularMarketChangePercent',0):+.1f}% vol={c.get('_vr',0):.1f}x" for i,c in enumerate(top3))
     tg(
-        f"🔍 T{tnum} PICKED — {q['symbol']}\n{'━'*22}\n"
+        f"🔍 Trade {tnum}/{RULES['MAX_TRADES_PER_DAY']} PICKED — {q['symbol']}\n{'━'*22}\n"
         f"Price:  ${price:.2f} | Pre-mkt {q.get('preMarketChangePercent',0):+.1f}%\n"
         f"Score:  {q.get('_score',0)}/99 | Vol {q.get('_vr',0):.1f}x\n"
         f"Range:  ${q.get('fiftyTwoWeekLow',0):.0f} - ${q.get('fiftyTwoWeekHigh',0):.0f}\n{'━'*22}\n"
         f"Capital ${paper['capital']:,.2f} | ~{shrs}sh\n"
-        f"Target ${price*(1+paper['targets'][tnum-1]):.2f} (+{tp:.0f}%)\n"
+        f"Target ${price*(1+RULES['TARGET_PCT']):.2f} (+{tp:.0f}%)\n"
         f"Stop   ${price*(1-RULES['STOP_PCT']):.2f} (-4%)\n{'━'*22}\n"
         f"Top candidates:\n{alts}\n"
         f"Reply 'enter' or use dashboard to confirm\n{APP_URL}"
     )
 
 # ── SCHEDULER ─────────────────────────────────────────────────────────
+def refresh_options_candidates():
+    """Keep up to OPTIONS_MAX_SLOTS simulated option positions filled from
+    the current scored candidate list, skipping whatever's already the active
+    equity trade or already tracked. This is an educational P&L estimate —
+    NOT real options data and NOT a real fill."""
+    if not is_market_open(): return
+    active_syms = set(paper['active'].keys())
+    tracked_syms = {c['symbol'] for c in options_tracker['candidates']}
+    slots_open = OPTIONS_MAX_SLOTS - len(options_tracker['candidates'])
+    if slots_open <= 0: return
+    for c in paper.get('candidates', []):
+        if slots_open <= 0: break
+        sym = c['symbol']
+        if sym in active_syms or sym in tracked_syms: continue
+        if c.get('_score', 0) < RULES['MIN_SCORE']: continue
+        cached = cp(sym)
+        price = cached['price'] if cached else c.get('regularMarketPrice', 0)
+        if not price: continue
+        pos = {
+            'symbol': sym, 'entry_underlying': price, 'current_underlying': price,
+            'entry_time': now_et(), 'entered_at': time.time(),
+            'score': c.get('_score', 0), 'peak_pnl_pct': 0.0,
+        }
+        options_tracker['candidates'].append(pos)
+        slots_open -= 1
+        p_log(f"OPTIONS (sim) entered {sym} @ ${price:.2f} underlying")
+        tg(f"🎯 Simulated Option Candidate — {sym}\n"
+           f"Underlying entry: ${price:.2f} (score {c.get('_score',0)}/99)\n"
+           f"Sim target: +{OPTIONS_TARGET_PCT*100:.0f}% · Sim stop: -{OPTIONS_STOP_PCT*100:.0f}%\n"
+           f"(Educational estimate — not a real options fill)")
+
+def monitor_options():
+    if not options_tracker['candidates']: return
+    for pos in list(options_tracker['candidates']):
+        sym = pos['symbol']; cached = cp(sym)
+        price = cached['price'] if cached else pos['current_underlying']
+        pos['current_underlying'] = price
+        underlying_pct = (price - pos['entry_underlying']) / pos['entry_underlying'] * 100
+        sim_option_pct = underlying_pct * OPTIONS_LEVERAGE
+        pos['peak_pnl_pct'] = max(pos.get('peak_pnl_pct', 0), sim_option_pct)
+        pos['sim_pnl_pct'] = sim_option_pct
+        closed_reason = None
+        if sim_option_pct >= OPTIONS_TARGET_PCT*100: closed_reason = 'target'
+        elif sim_option_pct <= -OPTIONS_STOP_PCT*100: closed_reason = 'stop'
+        elif pos['peak_pnl_pct'] >= 15 and (pos['peak_pnl_pct']-sim_option_pct) >= 10: closed_reason = 'momentum_stall'
+        if closed_reason:
+            options_tracker['candidates'].remove(pos)
+            options_tracker['completed'].insert(0, {**pos, 'exit_underlying': price,
+                'exit_time': now_et(), 'reason': closed_reason, 'sim_pnl_pct': sim_option_pct})
+            options_tracker['completed'] = options_tracker['completed'][:20]
+            icon = '💰' if closed_reason=='target' else '🛑' if closed_reason=='stop' else '🔄'
+            tg(f"{icon} Simulated Option CLOSED — {sym} ({closed_reason.upper()})\n"
+               f"Underlying ${pos['entry_underlying']:.2f}→${price:.2f} ({underlying_pct:+.1f}%)\n"
+               f"Sim option P&L: {sim_option_pct:+.1f}% (5x leverage estimate)\n"
+               f"(Educational estimate — not a real options fill)")
+            p_log(f"OPTIONS (sim) closed {sym} {closed_reason} sim P&L {sim_option_pct:+.1f}%")
+
 def job_morning():
     if not is_trading_day(): return
     paper_reset(); load_prev_closes()
@@ -552,11 +655,15 @@ def job_morning():
     )
     q=pick_best(sp,qp)
     if not q:
-        tg("⚠️ No qualifying setup found at 8AM. Will re-scan at 9:45 AM."); return
+        tg("⚠️ No qualifying setup found at 8AM. Will scan fresh at 9:45 AM."); return
     paper['picked']=q; paper['status']='picked'
-    _notify_pick(q)
+    tg(f"👀 EARLY PREVIEW — {q['symbol']} looks strongest right now (score {q.get('_score',0)}/99). "
+       f"This is NOT final — we re-scan with live data at 9:45 AM before risking any capital.")
 
 def job_enter_945():
+    """9:45 AM — opening volatility has settled. ALWAYS re-scan fresh here;
+    never blindly enter the stale 8AM pick (that was the root cause of
+    missing better setups like SOXL on big move days)."""
     if not is_trading_day(): return
     if paper['active']: return  # Already in a trade
     spy=cp('SPY'); qqq=cp('QQQ')
@@ -564,18 +671,39 @@ def job_enter_945():
     mkt_ok,_,_ = market_ok_to_trade()
     if not mkt_ok:
         tg(f"🚫 9:45 AM — Market too weak (SPY {sp:+.2f}% QQQ {qp:+.2f}%). Protecting capital today."); return
-    if paper['status']=='picked' and paper['picked']:
-        q=paper['picked']
-        p_log(f"9:45 AM entry: {q['symbol']}")
-        tg(f"⏰ 9:45 AM — Opening volatility settled. Entering {q['symbol']}...")
-        enter_trade(q)
-    elif paper['status']=='waiting':
-        q=pick_best(sp,qp)
-        if q:
-            paper['picked']=q; paper['status']='picked'
-            _notify_pick(q); time.sleep(5); enter_trade(q)
-        else:
-            tg("⚠️ 9:45 AM — No qualifying stock. Watching for setup...")
+    p_log("9:45 AM — running fresh scan (ignoring 8AM preview)")
+    q=pick_best(sp,qp)
+    if q:
+        paper['picked']=q; paper['status']='picked'
+        _notify_pick(q); time.sleep(5); enter_trade(q)
+    else:
+        tg("⚠️ 9:45 AM — No stock meets standards yet. Watching for a setup..."); paper['status']='waiting'
+
+# ── PER-SYMBOL NEWS CHECK (for active position emergency exit) ───────
+_symbol_news_cache = {}  # sym -> (ts, bool)
+def check_symbol_news(symbol):
+    now = time.time()
+    cached = _symbol_news_cache.get(symbol)
+    if cached and now - cached[0] < 90:
+        return cached[1]
+    hit = False
+    try:
+        url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US'
+        req = urllib.request.Request(url, headers={'User-Agent': UA})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            tree = ET.fromstring(r.read())
+            for item in tree.iter('item'):
+                t = item.find('title')
+                if t is not None and t.text:
+                    title = t.text.lower()
+                    if any(kw in title for kw in BAD_STOCK_KEYWORDS):
+                        hit = True; break
+    except Exception:
+        pass
+    _symbol_news_cache[symbol] = (now, hit)
+    return hit
+
+_last_rotate_check = 0
 
 def job_monitor():
     if not paper['active']: return
@@ -586,17 +714,64 @@ def job_monitor():
                 if sym in pos:
                     paper['active'][sym]['current']=float(pos[sym].current_price or t['current'])
         except: pass
+
+    # Market-wide danger alert applies to every open position
+    mkt_alert = scan_market_alerts()
+    market_danger = mkt_alert and mkt_alert.get('type') == 'danger'
+
+    global _last_rotate_check
+    check_rotation = (time.time() - _last_rotate_check) > 600  # throttle to every ~10 min
+
     for sym,t in list(paper['active'].items()):
         cached=cp(sym)
         price=cached['price'] if cached else t['current']
         paper['active'][sym]['current']=price
-        paper['active'][sym]['peak']=max(price,t.get('peak',price))
-        if price>=t['target']:   close_trade(sym,'target')
-        elif price<=t['stop']:   close_trade(sym,'stop')
-        elif datetime.now(ET_TZ).minute%30==0:
+        peak=max(price,t.get('peak',price))
+        paper['active'][sym]['peak']=peak
+        pnl_pct = (price - t['entry']) / t['entry'] * 100
+        peak_pct = (peak - t['entry']) / t['entry'] * 100
+        paper['active'][sym]['peak_pnl_pct'] = max(peak_pct, t.get('peak_pnl_pct', 0))
+
+        # 1. Bad news on THIS symbol, or a market-wide danger alert — exit now
+        if market_danger or check_symbol_news(sym):
+            label = mkt_alert['title'] if market_danger else f"Negative headline detected for {sym}"
+            paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 News exit: {label}", 'ts': now_et()}
+            p_log(f"NEWS EXIT triggered for {sym}: {label}")
+            close_trade(sym, 'news_exit')
+            continue
+
+        # 2. Hit profit ceiling
+        if price >= t['target']:
+            close_trade(sym,'target'); continue
+        # 3. Hit hard stop
+        if price <= t['stop']:
+            close_trade(sym,'stop'); continue
+        # 4. Trailing stop: once up TRAIL_TRIGGER_PCT+, exit if it gives back TRAIL_GIVEBACK_PCT from the peak
+        if peak_pct >= RULES['TRAIL_TRIGGER_PCT']*100 and (peak_pct - pnl_pct) >= RULES['TRAIL_GIVEBACK_PCT']*100:
+            p_log(f"{sym} momentum stalling — peak +{peak_pct:.1f}%, now +{pnl_pct:.1f}%. Locking in profit and rotating.")
+            close_trade(sym,'momentum_stall'); continue
+        # 5. Rotation: held a while with little gain AND a much better candidate exists
+        held_min = (time.time() - t.get('entered_at', time.time())) / 60
+        if check_rotation and held_min >= RULES['UNDERPERFORM_MINUTES'] and pnl_pct < RULES['UNDERPERFORM_MIN_PCT']:
+            spy=cp('SPY'); qqq=cp('QQQ')
+            better = pick_best(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0, exclude=[sym])
+            if better and better.get('_score',0) - t.get('score',0) >= RULES['UNDERPERFORM_SCORE_GAP']:
+                p_log(f"{sym} underperforming ({pnl_pct:+.1f}% in {held_min:.0f}min). {better['symbol']} scores {better['_score']} vs {t.get('score',0)} — rotating.")
+                tg(f"🔄 Rotating out of {sym} (+{pnl_pct:.1f}% in {held_min:.0f}min) into stronger setup {better['symbol']} (score {better['_score']}/99)")
+                close_trade(sym,'rotate_better'); continue
+            _last_rotate_check = time.time()
+
+        # Periodic status ping every ~30 min
+        if datetime.now(ET_TZ).minute%30==0:
             sig=get_hold_signal(paper['active'].get(sym,t))
             pnl=(price-t['entry'])*t['shares']
             tg(f"📊 T{t['trade_num']} {sym}\n${t['entry']:.2f}→${price:.2f} | {'+'if pnl>=0 else''}${pnl:.2f}\n{sig['icon']} {sig['signal']}: {sig['msg']}")
+
+    # Keep the simulated options tracker fresh every monitor tick
+    try:
+        refresh_options_candidates(); monitor_options()
+    except Exception as e:
+        print(f"  Options tracker: {e}")
 
 def job_eod():
     if not is_trading_day(): return
@@ -665,7 +840,7 @@ chat_history=[]
 def ai_chat(user_msg):
     active=list(paper['active'].values())
     ctx_parts=[
-        f"Trading state: {paper['status']}, Trade {paper['trade_seq']}/3, P&L ${paper['total_pnl']:+.2f}",
+        f"Trading state: {paper['status']}, Trade {paper['trade_seq']}/{RULES['MAX_TRADES_PER_DAY']}, P&L ${paper['total_pnl']:+.2f}",
         f"Capital: ${paper['capital']:,.2f}",
     ]
     if active:
@@ -767,8 +942,12 @@ def paper_status():
         cached=cp(t['symbol'])
         if cached: t['current']=cached['price']
         t['signal']=get_hold_signal(t)
+    alert = paper.get('trade_alert')
+    if alert:
+        paper['trade_alert'] = None  # one-shot — UI shows it once, then it's cleared
     return cors({
         'status':paper['status'],'trade_seq':paper['trade_seq'],
+        'max_trades':RULES['MAX_TRADES_PER_DAY'],
         'capital':round(paper['capital'],2),'starting_capital':paper['starting_capital'],
         'total_pnl':round(paper['total_pnl'],2),
         'total_pnl_pct':round(paper['total_pnl']/paper['starting_capital']*100,2) if paper['starting_capital'] else 0,
@@ -776,7 +955,44 @@ def paper_status():
         'date':paper['date'],'log':paper['log'][:10],
         'picked':paper['picked'],'candidates':paper.get('candidates',[])[:8],
         'better_opp':paper.get('better_opp'),'alpaca':alpaca_trading is not None,
+        'trade_alert':alert,
     })
+
+@app.route('/close-trade',methods=['POST'])
+def close_trade_route():
+    """Direct close — fixes the Sell/Exit buttons that used to go through
+    unreliable AI-chat text parsing."""
+    data=request.get_json() or {}
+    sym=data.get('symbol','').upper()
+    reason=data.get('reason','manual')
+    if sym not in paper['active']:
+        return cors({'ok':False,'msg':f'{sym} is not an active trade'})
+    close_trade(sym, reason)
+    return cors({'ok':True,'msg':f'Closed {sym}'})
+
+@app.route('/candles')
+def candles():
+    sym = request.args.get('symbol','').upper()
+    if not sym: return cors({'bars':[],'error':'no symbol'})
+    try:
+        df = yf.download(sym, period='5d', interval='5m', auto_adjust=True, progress=False)
+        if df.empty:
+            df = yf.download(sym, period='1mo', interval='15m', auto_adjust=True, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.dropna().tail(60)
+        bars = [{'t':str(i),'o':round(float(r.Open),2),'h':round(float(r.High),2),
+                 'l':round(float(r.Low),2),'c':round(float(r.Close),2)} for i,r in df.iterrows()]
+        return cors({'bars':bars,'symbol':sym})
+    except Exception as e:
+        return cors({'bars':[],'error':str(e)})
+
+@app.route('/options-status')
+def options_status():
+    return cors({'candidates':options_tracker['candidates'],
+                 'completed':options_tracker['completed'][:10],
+                 'max_slots':OPTIONS_MAX_SLOTS,
+                 'leverage':OPTIONS_LEVERAGE})
 
 @app.route('/watchlist-prices')
 def watchlist_prices():
@@ -897,25 +1113,6 @@ def scan_market_alerts():
     _alert_cache.update({'alert':None,'ts':time.time()})
     return None
 
-@app.route('/et-news')
-def et_news():
-    items=[]
-    for url in ['https://news.google.com/rss/search?q=site:ethiopianreporter.com&hl=en&gl=ET&ceid=ET:en',
-                'https://news.google.com/rss/search?q=ethiopianreporter.com+news&hl=en']:
-        try:
-            req=urllib.request.Request(url,headers={'User-Agent':UA})
-            with urllib.request.urlopen(req,timeout=8) as r:
-                tree=ET.fromstring(r.read())
-                for item in tree.iter('item'):
-                    t_el=item.find('title'); l_el=item.find('link'); d_el=item.find('pubDate')
-                    if t_el is not None and t_el.text and len(t_el.text.strip())>10:
-                        title=t_el.text.strip()
-                        if ' - ' in title: title=title.rsplit(' - ',1)[0].strip()
-                        items.append({'title':title,'link':l_el.text.strip() if l_el is not None and l_el.text else '','date':d_el.text.strip() if d_el is not None and d_el.text else ''})
-            if items: break
-        except Exception as e: print(f"  ET news: {e}")
-    return cors({'items':items[:20],'count':len(items)})
-
 @app.route('/market-summary')
 def market_summary():
     brief,is_ai=get_brief(); return cors({'brief':brief,'ai':is_ai})
@@ -953,7 +1150,7 @@ try:
     sched=BackgroundScheduler(timezone=ET_TZ)
     sched.add_job(job_morning,    'cron',day_of_week='mon-fri',hour=8, minute=0)
     sched.add_job(job_enter_945,  'cron',day_of_week='mon-fri',hour=9, minute=45)
-    sched.add_job(job_monitor,    'cron',day_of_week='mon-fri',hour='9-16',minute='*/2')
+    sched.add_job(job_monitor,    'cron',day_of_week='mon-fri',hour='9-16',minute='*')
     sched.add_job(job_eod,        'cron',day_of_week='mon-fri',hour=15,minute=55)
     sched.add_job(job_keepalive,  'interval',minutes=10)
     sched.start(); atexit.register(lambda:sched.shutdown(wait=False))
