@@ -240,6 +240,25 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .wl-suggest-why{font-size:8px;color:var(--t3);font-family:var(--mono)}
 
 /* ══ CHAT PAGE ═══════════════════════════════════════════════ */
+/* ══ WATCHLIST TAB ═══════════════════════════════════════════ */
+.wl-page{padding:9px;height:100%;overflow-y:auto}
+.wlt-stocks{display:flex;flex-direction:column;gap:7px}
+.wlt-card{background:var(--bg2);border:1.5px solid var(--border);border-radius:9px;padding:11px 13px}
+.wlt-card.qualifies{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.03)}
+.wlt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.wlt-sym{font-size:16px;font-weight:800;letter-spacing:-.3px}
+.wlt-name{font-size:8px;color:var(--t3);font-family:var(--mono)}
+.wlt-del{background:none;border:none;color:var(--t3);cursor:pointer;font-size:13px;padding:2px 6px}
+.wlt-del:hover{color:var(--red)}
+.wlt-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:7px}
+.wlt-stat{background:var(--bg3);border-radius:6px;padding:6px 7px;text-align:center}
+.wlt-stat-lbl{font-size:7px;color:var(--t3);font-family:var(--mono)}
+.wlt-stat-val{font-size:12px;font-weight:700;font-family:var(--mono)}
+.wlt-status{font-size:9px;font-family:var(--mono);padding:5px 9px;border-radius:6px;text-align:center;font-weight:600}
+.wlt-status.ok{background:rgba(52,211,153,.12);color:var(--green)}
+.wlt-status.no{background:rgba(71,85,105,.15);color:var(--t3)}
+.wl-suggest-row{display:flex;flex-wrap:wrap;gap:6px}
+
 .chat-page{padding:9px;display:flex;flex-direction:column;gap:8px;height:100%;overflow:hidden}
 .chat-suggest-row{display:flex;flex-wrap:wrap;gap:5px;flex-shrink:0}
 .suggest-btn{background:var(--bg3);border:1px solid var(--b2);border-radius:20px;padding:4px 10px;font-size:9px;color:var(--t2);cursor:pointer;font-family:'Inter',sans-serif;transition:all .12s;white-space:nowrap}
@@ -306,6 +325,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 <!-- ══ TABS ══ -->
 <div class="tabs" id="tabs">
   <button class="tab active" onclick="switchTab('trade',this)">📈 AutoTrade</button>
+  <button class="tab" onclick="switchTab('watchlist',this)">⭐ Watchlist</button>
   <button class="tab" onclick="switchTab('chat',this)">💬 AI Chat</button>
 </div>
 
@@ -387,6 +407,37 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     </div>
   </div>
 
+  <!-- WATCHLIST TAB -->
+  <div class="tab-page" id="tab-watchlist">
+    <div class="wl-page">
+      <div class="card" style="margin-bottom:8px">
+        <div class="card-t">⭐ Abiy's Watchlist <span class="cbadge" id="wlt-count">0/5</span></div>
+        <div style="font-size:9px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          Add up to 5 stocks here. The bot checks them every minute, with priority
+          over the general scanner — when one qualifies it enters automatically
+          and sends you a <b style="color:var(--green)">🌟 Abiy Watchlist</b> notification.
+        </div>
+        <div class="wl-add-row" style="margin-bottom:0">
+          <input class="wl-inp" id="wlt-inp" placeholder="Add ticker (e.g. SOXL)..." maxlength="6" onkeydown="if(event.key==='Enter')addWLT()" style="font-size:12px;padding:8px 10px">
+          <button class="wl-btn-add" onclick="addWLT()" style="padding:8px 14px;font-size:12px">+ Add</button>
+        </div>
+      </div>
+
+      <div id="wlt-body" class="wlt-stocks"></div>
+
+      <div class="card" style="margin-top:8px">
+        <div class="card-t">💥 100%+ Candidates — tap to add</div>
+        <div class="wl-suggest-row">
+          <div class="wl-suggest-item" onclick="quickAddWLT('DRAM')"><span class="wl-suggest-sym">DRAM</span><span class="wl-suggest-why">Memory ETF</span></div>
+          <div class="wl-suggest-item" onclick="quickAddWLT('NVDL')"><span class="wl-suggest-sym">NVDL</span><span class="wl-suggest-why">2x NVDA</span></div>
+          <div class="wl-suggest-item" onclick="quickAddWLT('MSTR')"><span class="wl-suggest-sym">MSTR</span><span class="wl-suggest-why">BTC proxy</span></div>
+          <div class="wl-suggest-item" onclick="quickAddWLT('SOXL')"><span class="wl-suggest-sym">SOXL</span><span class="wl-suggest-why">3x Semis</span></div>
+          <div class="wl-suggest-item" onclick="quickAddWLT('RGTI')"><span class="wl-suggest-sym">RGTI</span><span class="wl-suggest-why">Quantum</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- CHAT TAB -->
   <div class="tab-page" id="tab-chat">
     <div class="chat-page">
@@ -433,6 +484,7 @@ function switchTab(name,el){
   document.querySelectorAll('.tab-page').forEach(p=>p.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
+  if(name==='watchlist')refreshWLT();
 }
 
 // ── CLOCK ─────────────────────────────────────────────────────────────
@@ -756,19 +808,68 @@ async function addWL(){
   if(!sym)return;
   if(myWL.includes(sym)){toast('Already in list');return;}
   if(myWL.length>=5){toast('Max 5 stocks');return;}
-  myWL.push(sym);inp.value='';await saveWL();renderWL();toast('Added '+sym);
+  myWL.push(sym);inp.value='';await saveWL();renderWL();toast('Added '+sym);refreshWLT();
 }
 async function removeWL(sym){
-  myWL=myWL.filter(s=>s!==sym);await saveWL();renderWL();
+  myWL=myWL.filter(s=>s!==sym);await saveWL();renderWL();refreshWLT();
 }
 async function quickAdd(sym){
   if(myWL.includes(sym)){toast(sym+' already added');return;}
   if(myWL.length>=5){toast('Max 5 stocks');return;}
-  myWL.push(sym);await saveWL();renderWL();toast('Added '+sym);
+  myWL.push(sym);await saveWL();renderWL();toast('Added '+sym);refreshWLT();
 }
 async function saveWL(){
   try{await fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:myWL})});}catch(e){}
 }
+
+// ── DEDICATED WATCHLIST TAB ──────────────────────────────────────────
+async function addWLT(){
+  const inp=document.getElementById('wlt-inp');
+  const sym=inp.value.trim().toUpperCase().replace(/[^A-Z]/g,'');
+  if(!sym)return;
+  if(myWL.includes(sym)){toast('Already in list');return;}
+  if(myWL.length>=5){toast('Max 5 stocks');return;}
+  myWL.push(sym);inp.value='';await saveWL();renderWL();toast('Added '+sym);refreshWLT();
+}
+async function removeWLT(sym){
+  myWL=myWL.filter(s=>s!==sym);await saveWL();renderWL();refreshWLT();
+}
+async function quickAddWLT(sym){
+  if(myWL.includes(sym)){toast(sym+' already added');return;}
+  if(myWL.length>=5){toast('Max 5 stocks');return;}
+  myWL.push(sym);await saveWL();renderWL();toast('Added '+sym);refreshWLT();
+}
+async function refreshWLT(){
+  document.getElementById('wlt-count').textContent=myWL.length+'/5';
+  const body=document.getElementById('wlt-body');
+  if(!myWL.length){
+    body.innerHTML='<div class="card"><div class="empty">No stocks added yet — add up to 5 above, or tap a 100%+ candidate below</div></div>';
+    return;
+  }
+  try{
+    const d=await(await fetch('/watchlist-status')).json();
+    const stocks=d.stocks||[];
+    body.innerHTML=stocks.map(s=>{
+      const up=s.change_pct>=0;
+      return `<div class="wlt-card ${s.qualifies?'qualifies':''}">
+        <div class="wlt-head">
+          <div><div class="wlt-sym">${s.symbol}</div><div class="wlt-name">${s.name||''}</div></div>
+          <button class="wlt-del" onclick="removeWLT('${s.symbol}')">✕</button>
+        </div>
+        <div class="wlt-stats">
+          <div class="wlt-stat"><div class="wlt-stat-lbl">Price</div><div class="wlt-stat-val">$${s.price.toFixed(2)}</div></div>
+          <div class="wlt-stat"><div class="wlt-stat-lbl">Chg</div><div class="wlt-stat-val" style="color:${up?'var(--green)':'var(--red)'}">${up?'+':''}${s.change_pct.toFixed(1)}%</div></div>
+          <div class="wlt-stat"><div class="wlt-stat-lbl">Vol</div><div class="wlt-stat-val">${s.vol_ratio.toFixed(1)}x</div></div>
+          <div class="wlt-stat"><div class="wlt-stat-lbl">Score</div><div class="wlt-stat-val" style="${scCls(s.score)}">${s.score}/99</div></div>
+        </div>
+        <div class="wlt-status ${s.qualifies?'ok':'no'}">${s.qualifies?'✅ Qualifies — will auto-enter on next check':'⏳ '+(s.why_not||'Not ready yet')}</div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    body.innerHTML='<div class="card"><div class="empty">Failed to load live scores</div></div>';
+  }
+}
+setInterval(()=>{if(document.getElementById('tab-watchlist').classList.contains('active'))refreshWLT();},5000);
 
 // ── TRADE ACTIONS ─────────────────────────────────────────────────────
 async function enterNow(sym){

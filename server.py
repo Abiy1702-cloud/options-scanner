@@ -105,10 +105,11 @@ OPTIONS_LEVERAGE    = 5      # Approximate leverage of an ATM short-dated option
 OPTIONS_TARGET_PCT  = 0.35   # Simulated option-level take-profit
 OPTIONS_STOP_PCT    = 0.25   # Simulated option-level stop
 # Bad-news keywords that trigger an immediate exit of an ACTIVE position
-BAD_STOCK_KEYWORDS = ['downgrade','lawsuit','recall','investigation','plunge',
-    'sell-off','selloff','miss estimates','misses estimates','cuts guidance',
-    'fraud','bankruptcy','delisted','halted','sec probe','short report',
-    'accounting','class action','subpoena','resigns','ceo steps down']
+BAD_STOCK_KEYWORDS = ['downgrade','lawsuit','recall','fraud investigation',
+    'plunges','sell-off','selloff','misses estimates','cuts guidance',
+    'accounting fraud','bankruptcy','delisted','sec investigation',
+    'short report','class action','subpoena','ceo resigns','ceo steps down',
+    'restated earnings','going concern']
 
 # ── PRICE CACHE ───────────────────────────────────────────────────────
 _prices    = {}
@@ -413,6 +414,32 @@ def get_full_quotes_cached(symbols):
     _quotes_cache['ts'] = now
     return fresh
 
+# ── DEDICATED WATCHLIST QUOTES (fast, separate cache — up to 5 stocks) ─
+_watchlist_quotes_cache = {'data':{}, 'ts':0}
+WATCHLIST_QUOTES_TTL = 20  # refresh much faster than the 82-stock universe
+WATCHLIST_MIN_SCORE = 50   # more lenient than universe MIN_SCORE — Abiy chose these himself
+
+def get_watchlist_quotes():
+    if not custom_watchlist: return []
+    now = time.time()
+    if now - _watchlist_quotes_cache['ts'] < WATCHLIST_QUOTES_TTL and _watchlist_quotes_cache['data']:
+        return list(_watchlist_quotes_cache['data'].values())
+    fresh = get_full_quotes(custom_watchlist)
+    _watchlist_quotes_cache['data'] = {q['symbol']: q for q in fresh}
+    _watchlist_quotes_cache['ts'] = now
+    return fresh
+
+def score_watchlist(spy_pct=0, qqq_pct=0):
+    out = []
+    for q in get_watchlist_quotes():
+        q['_score'] = score_day_trade(q, spy_pct, qqq_pct)
+        q['_qualifies'] = q['_score'] >= WATCHLIST_MIN_SCORE and q.get('_vr',0) >= 1.0
+        out.append(q)
+    out.sort(key=lambda x: x['_score'], reverse=True)
+    return out
+
+_last_watchlist_notify = {}
+
 # ── PAPER TRADING ─────────────────────────────────────────────────────
 paper = {
     'capital':10000.0,'starting_capital':10000.0,'trade_seq':1,
@@ -581,7 +608,27 @@ def _auto_pick_enter():
         if not ok:
             p_log(f"Auto-pick skipped: {reason}"); return
         spy=cp('SPY'); qqq=cp('QQQ')
-        q=pick_best(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0)
+        spy_pct = spy['pct'] if spy else 0
+        qqq_pct = qqq['pct'] if qqq else 0
+
+        # 1. PRIORITY: Abiy's own watchlist (up to 5 stocks) gets checked first,
+        # with a more lenient bar since these were hand-picked, not algorithm-found.
+        if custom_watchlist:
+            best_wl = next((q for q in score_watchlist(spy_pct, qqq_pct) if q['_qualifies']), None)
+            if best_wl:
+                last = _last_watchlist_notify.get(best_wl['symbol'], 0)
+                if time.time() - last > 60:
+                    tg(f"🌟 ABIY WATCHLIST OPPORTUNITY — {best_wl['symbol']}\n{'━'*22}\n"
+                       f"Score {best_wl['_score']}/99 | Vol {best_wl.get('_vr',0):.1f}x | "
+                       f"Chg {best_wl.get('regularMarketChangePercent',0):+.1f}%\n"
+                       f"Entering now — picked from your personal watchlist.\n{APP_URL}")
+                    _last_watchlist_notify[best_wl['symbol']] = time.time()
+                paper['picked'] = best_wl; paper['status'] = 'picked'
+                enter_trade(best_wl)
+                return
+
+        # 2. Fall back to the full curated universe scan
+        q=pick_best(spy_pct, qqq_pct)
         if not q:
             p_log(f"No qualifying stock yet (score≥{RULES['MIN_SCORE']}, vol≥{RULES['MIN_VOLUME_RATIO']}x) — will keep scanning every minute")
             if time.time() - _last_no_setup_notify > 600:  # at most once every 10 min
@@ -725,10 +772,23 @@ def check_symbol_news(symbol):
             tree = ET.fromstring(r.read())
             for item in tree.iter('item'):
                 t = item.find('title')
-                if t is not None and t.text:
-                    title = t.text.lower()
-                    if any(kw in title for kw in BAD_STOCK_KEYWORDS):
-                        hit = True; break
+                if t is None or not t.text: continue
+                # Skip stale articles — only react to news from the last 24h,
+                # otherwise an old headline can trigger a false-positive exit
+                # seconds after entry (this is what happened with FCEL).
+                pub = item.find('pubDate')
+                if pub is not None and pub.text:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        pub_dt = parsedate_to_datetime(pub.text)
+                        age_hrs = (datetime.now(pub_dt.tzinfo) - pub_dt).total_seconds() / 3600
+                        if age_hrs > 24:
+                            continue
+                    except Exception:
+                        pass
+                title = t.text.lower()
+                if any(kw in title for kw in BAD_STOCK_KEYWORDS):
+                    hit = True; break
     except Exception:
         pass
     _symbol_news_cache[symbol] = (now, hit)
@@ -775,8 +835,13 @@ def job_monitor():
         peak_pct = (peak - t['entry']) / t['entry'] * 100
         paper['active'][sym]['peak_pnl_pct'] = max(peak_pct, t.get('peak_pnl_pct', 0))
 
-        # 1. Bad news on THIS symbol, or a market-wide danger alert — exit now
-        if market_danger or check_symbol_news(sym):
+        # 1. Bad news on THIS symbol, or a market-wide danger alert — exit now.
+        # Per-symbol news gets a 3-min grace period after entry so a stale
+        # headline already sitting in the RSS feed can't cause an instant
+        # flip-flop exit right after buying (this is what happened with FCEL).
+        held_sec = time.time() - t.get('entered_at', time.time())
+        symbol_news_hit = held_sec > 180 and check_symbol_news(sym)
+        if market_danger or symbol_news_hit:
             label = mkt_alert['title'] if market_danger else f"Negative headline detected for {sym}"
             paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 News exit: {label}", 'ts': now_et()}
             p_log(f"NEWS EXIT triggered for {sym}: {label}")
@@ -1049,6 +1114,26 @@ def watchlist_prices():
             items.append({'symbol':sym,'price':0,'pct':0,'source':'—'})
     return cors({'items':items})
 
+@app.route('/watchlist-status')
+def watchlist_status():
+    """Live-scored view of Abiy's personal watchlist for the dedicated tab."""
+    if not custom_watchlist:
+        return cors({'stocks':[],'min_score':WATCHLIST_MIN_SCORE})
+    spy=cp('SPY'); qqq=cp('QQQ')
+    scored = score_watchlist(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0)
+    out = []
+    for q in scored:
+        why_not = []
+        if q['_score'] < WATCHLIST_MIN_SCORE: why_not.append(f"score {q['_score']}<{WATCHLIST_MIN_SCORE}")
+        if q.get('_vr',0) < 1.0: why_not.append(f"volume {q.get('_vr',0):.1f}x<1.0x")
+        out.append({
+            'symbol': q['symbol'], 'name': q.get('shortName', q['symbol']),
+            'price': q.get('regularMarketPrice', 0), 'score': q['_score'],
+            'vol_ratio': q.get('_vr', 0), 'change_pct': q.get('regularMarketChangePercent', 0),
+            'qualifies': q['_qualifies'], 'why_not': ', '.join(why_not) if why_not else None,
+        })
+    return cors({'stocks': out, 'min_score': WATCHLIST_MIN_SCORE})
+
 @app.route('/enter-now',methods=['POST'])
 def enter_now():
     data=request.get_json() or {}
@@ -1081,7 +1166,16 @@ def paper_reset_route(): paper_reset(); return cors({'ok':True})
 
 @app.route('/paper-force-pick')
 def paper_force_pick():
-    paper_reset(); threading.Thread(target=job_morning,daemon=True).start()
+    # Don't wipe the day's trades/capital just because the button was
+    # clicked mid-morning — that was producing confusing "at 8AM" messages
+    # hours later and erasing real trade history. Just trigger an
+    # immediate scan-and-enter attempt using whatever capital/state exists.
+    if paper['active']:
+        return cors({'ok':False,'msg':'Already in a trade — nothing to force.'})
+    if paper['date'] != datetime.now(ET_TZ).date().isoformat():
+        paper_reset()  # genuinely a new day, safe to reset
+    paper['status'] = 'waiting'
+    threading.Thread(target=_auto_pick_enter, daemon=True).start()
     return cors({'ok':True})
 
 @app.route('/watchlist',methods=['GET','POST'])
