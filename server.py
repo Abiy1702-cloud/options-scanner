@@ -17,6 +17,14 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY','')
 TELEGRAM_TOKEN= os.environ.get('TELEGRAM_BOT_TOKEN','')
 TELEGRAM_CHAT = os.environ.get('TELEGRAM_CHAT_ID','')
 APP_URL       = os.environ.get('APP_URL','https://your-app.onrender.com')
+_detected_app_url = None
+def get_app_url():
+    """Falls back to the actual request host if APP_URL was never set on
+    Render (or still has the placeholder value) — fixes Telegram links
+    pointing at 'your-app.onrender.com' literally."""
+    if APP_URL and 'your-app' not in APP_URL:
+        return APP_URL
+    return _detected_app_url or APP_URL
 PORT          = int(os.environ.get('PORT',8765))
 ET_TZ         = pytz.timezone('America/New_York')
 UA            = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
@@ -66,6 +74,12 @@ ABIY_PIN = os.environ.get('ABIY_PIN', '').strip()
 def _expected_token():
     return hashlib.sha256((ABIY_PIN + 'autotrade-pro-salt-2026').encode()).hexdigest()
 _PUBLIC_PATHS = {'/', '/ping', '/unlock'}
+
+@app.before_request
+def _detect_url():
+    global _detected_app_url
+    if _detected_app_url is None and request.host and ('onrender.com' in request.host or '.' in request.host) and 'localhost' not in request.host:
+        _detected_app_url = f"https://{request.host}"
 
 @app.before_request
 def _check_auth():
@@ -381,6 +395,56 @@ def score_day_trade(q, spy_pct=0, qqq_pct=0):
 
     return min(99, max(0, round(score)))
 
+def fetch_intraday_bars(symbol):
+    """5-min bars for today's session, used by both the chart and the signal."""
+    try:
+        df = yf.download(symbol, period='1d', interval='5m', auto_adjust=True, progress=False)
+        if df.empty:
+            df = yf.download(symbol, period='5d', interval='15m', auto_adjust=True, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except Exception:
+        return pd.DataFrame()
+
+def compute_intraday_signal(symbol):
+    """VWAP + 9/20 EMA — research on what professional day traders actually
+    watch consistently points to this exact 2-indicator combo over loading
+    a chart with 8+ indicators (more indicators measured worse win rates in
+    several studies). VWAP = institutional fair value for today; 9/20 EMA
+    cross = short-term momentum direction. Buy when price is above VWAP,
+    the fast EMA is above the slow EMA, and price is actually rising —
+    sell/wait when that breaks down."""
+    df = fetch_intraday_bars(symbol)
+    if df.empty or len(df) < 6:
+        return None
+    typical = (df['High'] + df['Low'] + df['Close']) / 3
+    cum_vol = df['Volume'].cumsum().replace(0, 1)
+    vwap = (typical * df['Volume']).cumsum() / cum_vol
+    ema9 = df['Close'].ewm(span=9, adjust=False).mean()
+    ema20 = df['Close'].ewm(span=20, adjust=False).mean()
+    last_close = float(df['Close'].iloc[-1])
+    last_vwap  = float(vwap.iloc[-1])
+    last_ema9  = float(ema9.iloc[-1])
+    last_ema20 = float(ema20.iloc[-1])
+    rising = last_close > float(df['Close'].iloc[-3])
+    above_vwap = last_close > last_vwap
+    ema_bull = last_ema9 > last_ema20
+
+    if above_vwap and ema_bull and rising:
+        signal, reason = 'BUY', f"Above VWAP (${last_vwap:.2f}), 9EMA>20EMA, rising"
+    elif (not above_vwap) and (not ema_bull):
+        signal, reason = 'SELL', f"Below VWAP (${last_vwap:.2f}), 9EMA<20EMA — momentum bearish"
+    else:
+        signal, reason = 'WAIT', f"Mixed: {'above' if above_vwap else 'below'} VWAP, 9EMA {'>' if ema_bull else '<'} 20EMA"
+    return {
+        'signal': signal, 'reason': reason, 'price': round(last_close,2),
+        'vwap': round(last_vwap,2), 'ema9': round(last_ema9,2), 'ema20': round(last_ema20,2),
+        'vwap_series': [round(float(v),2) for v in vwap.tolist()],
+        'ema9_series': [round(float(v),2) for v in ema9.tolist()],
+        'ema20_series': [round(float(v),2) for v in ema20.tolist()],
+    }
+
 def get_hold_signal(t):
     """Real-time hold/sell/exit recommendation based on trade position"""
     entry  = t['entry']
@@ -511,6 +575,9 @@ paper = {
     'active':{},'completed':[],'total_pnl':0.0,
     'status':'waiting','picked':None,'date':None,'log':[],
     'candidates':[],'better_opp':None,'skipped':[],'trade_alert':None,
+    'pro_locked_symbol':None,  # Abiy PRO Live: once set, the bot ONLY trades
+                               # this one symbol (buy signal -> auto re-buy
+                               # cycle) instead of rotating the universe.
 }
 
 def p_log(msg):
@@ -706,7 +773,7 @@ def enter_trade(q, manual=False, bypass_hours=False):
         f"Target:  ${trade['target']:.2f} (+{tp*100:.0f}%)\n"
         f"Stop:    ${trade['stop']:.2f} (-{stop*100:.0f}%)\n"
         f"Why:     {reason_str}\n{'━'*22}\n"
-        f"Dashboard: {APP_URL}"
+        f"Dashboard: {get_app_url()}"
     )
     return True
 
@@ -740,17 +807,21 @@ def close_trade(sym, reason='target'):
         f"Total: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}"
     )
     nxt = paper['trade_seq']+1
-    can_rotate, _ = can_enter()
+    locked = paper.get('pro_locked_symbol')
+    can_rotate, _ = (True, "OK") if locked else can_enter()
     if nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open() and can_rotate:
         paper['trade_seq']=nxt; paper['status']='waiting'
-        tg(f"🔍 Trade {nxt}/{RULES['MAX_TRADES_PER_DAY']} — scanning for next setup...")
+        if locked:
+            tg(f"🎯 Watching {locked} for the next VWAP/EMA buy signal (Abiy PRO Live)...")
+        else:
+            tg(f"🔍 Trade {nxt}/{RULES['MAX_TRADES_PER_DAY']} — scanning for next setup...")
         threading.Thread(target=_auto_pick_enter, daemon=True).start()
     elif nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open():
         paper['status']='waiting'  # market open but past cutoff time — will retry via job_monitor
     else:
         paper['status']='done'
         if nxt>RULES['MAX_TRADES_PER_DAY']:
-            tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{APP_URL}")
+            tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{get_app_url()}")
 
 _pick_lock = threading.Lock()
 _picking_now = False
@@ -763,6 +834,27 @@ def _auto_pick_enter():
         _picking_now = True
     try:
         time.sleep(3)
+
+        # -1. TOP PRIORITY: Abiy PRO Live locked symbol. Once he's manually
+        # bought a stock from that tab, the bot stops rotating the universe
+        # entirely and ONLY watches this one symbol for a fresh VWAP/EMA buy
+        # signal, re-entering automatically — no more button clicks needed
+        # until he releases the lock.
+        locked = paper.get('pro_locked_symbol')
+        if locked and is_market_open():
+            sig = compute_intraday_signal(locked)
+            if sig and sig['signal'] == 'BUY':
+                cached = cp(locked)
+                if cached:
+                    q = {'symbol':locked,'shortName':locked,'regularMarketPrice':cached['price'],
+                         '_vr':2,'regularMarketChangePercent':cached['pct'],'marketCap':5e9,
+                         'fiftyTwoWeekHigh':0,'fiftyTwoWeekLow':0,'preMarketChangePercent':0,'_score':0}
+                    tg(f"🎯 ABIY PRO LIVE — re-entering {locked}\n{'━'*22}\n{sig['reason']}\nAuto re-buy from your locked symbol.")
+                    paper['picked']=q; paper['status']='picked'
+                    enter_trade(q, manual=True)
+            return
+        elif locked:
+            return  # locked but market closed — just wait, don't fall through to universe
 
         # 0. PRE-MARKET window (watchlist only, limit orders, extra caution)
         if is_premarket_window() and not is_market_open():
@@ -778,7 +870,7 @@ def _auto_pick_enter():
                        f"Score {best_wl['_score']}/99 | Vol {best_wl.get('_vr',0):.1f}x | "
                        f"Chg {best_wl.get('regularMarketChangePercent',0):+.1f}%\n"
                        f"Entering with a LIMIT order (extended hours) — pre-market liquidity "
-                       f"is thinner, so this may fill partially or not at all.\n{APP_URL}")
+                       f"is thinner, so this may fill partially or not at all.\n{get_app_url()}")
                     _last_watchlist_notify[best_wl['symbol']] = time.time()
                 paper['picked'] = best_wl; paper['status'] = 'picked'
                 enter_trade(best_wl, bypass_hours=True)
@@ -801,7 +893,7 @@ def _auto_pick_enter():
                     tg(f"🌟 ABIY WATCHLIST OPPORTUNITY — {best_wl['symbol']}\n{'━'*22}\n"
                        f"Score {best_wl['_score']}/99 | Vol {best_wl.get('_vr',0):.1f}x | "
                        f"Chg {best_wl.get('regularMarketChangePercent',0):+.1f}%\n"
-                       f"Entering now — picked from your personal watchlist.\n{APP_URL}")
+                       f"Entering now — picked from your personal watchlist.\n{get_app_url()}")
                     _last_watchlist_notify[best_wl['symbol']] = time.time()
                 paper['picked'] = best_wl; paper['status'] = 'picked'
                 enter_trade(best_wl)
@@ -836,7 +928,7 @@ def _notify_pick(q):
         f"Target ${price*(1+RULES['TARGET_PCT']):.2f} (+{tp:.0f}%)\n"
         f"Stop   ${price*(1-RULES['STOP_PCT']):.2f} (-4%)\n{'━'*22}\n"
         f"Top candidates:\n{alts}\n"
-        f"Reply 'enter' or use dashboard to confirm\n{APP_URL}"
+        f"Reply 'enter' or use dashboard to confirm\n{get_app_url()}"
     )
 
 # ── SCHEDULER ─────────────────────────────────────────────────────────
@@ -969,7 +1061,7 @@ def job_morning():
         f"SPY {sp:+.2f}% | QQQ {qp:+.2f}%\n"
         f"Strategy: T1 +10% · T2/3 +5%\n"
         f"Rules: Enter 9:45AM · Stop 4% · No trades after 2:30PM\n{'━'*22}\n"
-        f"Scanning {len(ALL_UNIVERSE)+len(custom_watchlist)} stocks...\n{APP_URL}"
+        f"Scanning {len(ALL_UNIVERSE)+len(custom_watchlist)} stocks...\n{get_app_url()}"
     )
     q=pick_best(sp,qp)
     if not q:
@@ -1041,7 +1133,10 @@ def job_monitor():
         # if 9:45's scan came up empty, nothing ever tried again until you
         # manually clicked Force Pick.
         if paper['status'] in ('waiting', 'picked') and is_trading_day():
-            if is_premarket_window():
+            if paper.get('pro_locked_symbol'):
+                if is_market_open():
+                    threading.Thread(target=_auto_pick_enter, daemon=True).start()
+            elif is_premarket_window():
                 ok, _ = can_enter_premarket()
                 if ok:
                     threading.Thread(target=_auto_pick_enter, daemon=True).start()
@@ -1133,14 +1228,14 @@ def job_eod():
            f"{'━'*22}"]
     for t in paper['completed']:
         lines.append(f"{'✅'if t['pnl']>=0 else'🔴'} T{t['trade_num']} {t['symbol']}: {'+'if t['pnl']>=0 else''}${t['pnl']:.2f} ({t['pnl_pct']:+.2f}%) [{t['reason'].upper()}]")
-    lines+=[f"{'━'*22}",f"{APP_URL}"]
+    lines+=[f"{'━'*22}",f"{get_app_url()}"]
     tg('\n'.join(lines))
 
 def job_keepalive():
     n=datetime.now(ET_TZ); t=n.hour*60+n.minute
     if n.weekday()>=5 or t<7*60 or t>17*60: return
     try:
-        urllib.request.urlopen(urllib.request.Request(f"{APP_URL}/ping",headers={'User-Agent':UA}),timeout=8)
+        urllib.request.urlopen(urllib.request.Request(f"{get_app_url()}/ping",headers={'User-Agent':UA}),timeout=8)
     except: pass
 
 # ── NEWS & AI ─────────────────────────────────────────────────────────
@@ -1305,7 +1400,7 @@ def paper_status():
         'date':paper['date'],'log':paper['log'][:10],
         'picked':paper['picked'],'candidates':paper.get('candidates',[])[:8],
         'better_opp':paper.get('better_opp'),'alpaca':alpaca_trading is not None,
-        'trade_alert':alert,
+        'trade_alert':alert,'pro_locked_symbol':paper.get('pro_locked_symbol'),
     })
 
 @app.route('/close-trade',methods=['POST'])
@@ -1366,6 +1461,56 @@ def trade_markers():
             markers.append({'type':'buy','time':t['entry_time'],'price':t['entry']})
     return cors({'markers':markers})
 
+@app.route('/pro-watch', methods=['POST'])
+def pro_watch():
+    """Set the watched symbol WITHOUT entering a trade — Abiy decides when to buy."""
+    data = request.get_json() or {}
+    sym = data.get('symbol','').upper()
+    if not sym: return cors({'ok':False,'msg':'No symbol given'})
+    paper['pro_locked_symbol'] = sym
+    save_state()
+    p_log(f"PRO Live: now watching {sym} (manual buy required first)")
+    return cors({'ok':True,'symbol':sym})
+
+@app.route('/pro-signal')
+def pro_signal():
+    sym = request.args.get('symbol','').upper()
+    if not sym: return cors({'signal':None})
+    sig = compute_intraday_signal(sym)
+    return cors({'signal': sig})
+
+@app.route('/pro-buy', methods=['POST'])
+def pro_buy():
+    """Manual first entry for PRO Live — strictly market-hours only, no
+    exceptions, since this is a deliberate hands-on decision, not an
+    auto-scan pick."""
+    if not is_market_open():
+        return cors({'ok':False,'msg':'Market is closed — entries only work 9:30 AM-4:00 PM ET'})
+    data = request.get_json() or {}
+    sym = data.get('symbol','').upper()
+    if not sym: return cors({'ok':False,'msg':'No symbol given'})
+    if paper['active']:
+        return cors({'ok':False,'msg':f"Already in a trade ({list(paper['active'].keys())[0]})"})
+    cached = cp(sym)
+    if not cached: return cors({'ok':False,'msg':f'No price data for {sym}'})
+    q = {'symbol':sym,'shortName':sym,'regularMarketPrice':cached['price'],
+         '_vr':2,'regularMarketChangePercent':cached['pct'],'marketCap':5e9,
+         'fiftyTwoWeekHigh':0,'fiftyTwoWeekLow':0,'preMarketChangePercent':0,'_score':0}
+    ok = enter_trade(q, manual=True)
+    if ok:
+        paper['pro_locked_symbol'] = sym
+        save_state()
+        p_log(f"PRO Live: manual buy {sym} — bot will auto re-buy this symbol after exits from now on")
+    return cors({'ok':ok,'msg':f"Entered {sym}" if ok else "Entry failed"})
+
+@app.route('/pro-release', methods=['POST'])
+def pro_release():
+    """Stop following the locked symbol — return to normal watchlist/universe rotation."""
+    paper['pro_locked_symbol'] = None
+    save_state()
+    p_log("PRO Live: released the locked symbol — back to normal rotation")
+    return cors({'ok':True})
+
 @app.route('/watchlist-prices')
 def watchlist_prices():
     if not custom_watchlist: return cors({'items':[]})
@@ -1400,6 +1545,8 @@ def watchlist_status():
 
 @app.route('/enter-now',methods=['POST'])
 def enter_now():
+    if not is_market_open():
+        return cors({'ok':False,'msg':'Market is closed — manual entries only work 9:30 AM-4:00 PM ET'})
     data=request.get_json() or {}
     sym=data.get('symbol','').upper()
     q=next((c for c in paper.get('candidates',[]) if c['symbol']==sym),None)
@@ -1565,7 +1712,7 @@ def account():
 
 @app.route('/test-telegram')
 def test_telegram():
-    ok=tg(f"✅ AutoTrade Pro\nAlpaca: {'✅' if alpaca_trading else '❌'} | AI: {'✅' if ANTHROPIC_KEY else '❌'}\nUniverse: {len(ALL_UNIVERSE)} stocks\n{APP_URL}")
+    ok=tg(f"✅ AutoTrade Pro\nAlpaca: {'✅' if alpaca_trading else '❌'} | AI: {'✅' if ANTHROPIC_KEY else '❌'}\nUniverse: {len(ALL_UNIVERSE)} stocks\n{get_app_url()}")
     return cors({'ok':ok,'msg':'Sent!' if ok else 'Failed.'})
 
 @app.route('/market-alert')

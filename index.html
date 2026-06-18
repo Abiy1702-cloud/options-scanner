@@ -244,6 +244,20 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 /* ══ WATCHLIST TAB ═══════════════════════════════════════════ */
 .wl-page{padding:9px;height:100%;overflow-y:auto}
 .pro-page{padding:9px;height:100%;overflow-y:auto}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.7);animation:live-pulse 1.5s infinite}
+@keyframes live-pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.6)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+.pro-chart-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.pro-actions{display:flex;gap:6px;margin-top:8px}
+.pro-actions .btn-sell{flex:2}
+.pro-actions .wlt-del{flex:1;font-size:9px;font-family:var(--mono);cursor:pointer;background:var(--bg3)}
+.pro-sig-banner{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;font-family:var(--mono)}
+.pro-sig-buy{background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.35)}
+.pro-sig-wait{background:rgba(148,163,184,.08);border:1px solid var(--border)}
+.pro-sig-sell{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.35)}
+.pro-sig-icon{font-size:20px}
+.pro-sig-text{flex:1}
+.pro-sig-label{font-size:13px;font-weight:800}
+.pro-sig-reason{font-size:9px;color:var(--t2);margin-top:2px}
 .wlt-stocks{display:flex;flex-direction:column;gap:7px}
 .wlt-card{background:var(--bg2);border:1.5px solid var(--border);border-radius:9px;padding:11px 13px}
 .wlt-card.qualifies{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.03)}
@@ -459,28 +473,47 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
   <div class="tab-page" id="tab-prolive">
     <div class="pro-page">
       <div class="card" style="margin-bottom:8px">
-        <div class="card-t">🎯 Abiy PRO Day Trade — Live <span class="cbadge" id="pro-sym-badge">—</span></div>
+        <div class="card-t">🎯 Abiy PRO Day Trade — Live <span class="cbadge" id="pro-sym-badge">No symbol watched</span></div>
         <div style="font-size:9px;color:var(--t2);line-height:1.6;margin-bottom:8px">
-          Live price for whatever's currently active (or your override below).
-          Green BUY / red SELL markers show real entries and exits as they happen —
-          buy dips, sell rips, rotate, repeat.
+          Type a stock, watch its live VWAP + 9/20 EMA signal, and buy yourself when
+          you see a green BUY. After that first buy, the bot keeps trading <i>only</i>
+          this stock automatically — selling on a real reversal, buying back when the
+          signal turns green again — until you release it below.
         </div>
         <div class="wl-add-row" style="margin-bottom:0">
-          <input class="wl-inp" id="pro-override-inp" placeholder="Type a ticker to override the pick..." maxlength="6" onkeydown="if(event.key==='Enter')overridePick()" style="font-size:12px;padding:8px 10px">
-          <button class="wl-btn-add" onclick="overridePick()" style="padding:8px 14px;font-size:12px">Use This</button>
+          <input class="wl-inp" id="pro-override-inp" placeholder="Type a ticker to watch (e.g. SOXL)..." maxlength="6" onkeydown="if(event.key==='Enter')watchSymbol()" style="font-size:12px;padding:8px 10px">
+          <button class="wl-btn-add" onclick="watchSymbol()" style="padding:8px 14px;font-size:12px">👁 Watch</button>
         </div>
       </div>
 
-      <div class="card" id="pro-chart-card">
-        <canvas id="pro-canvas" style="width:100%;height:260px;display:block"></canvas>
-        <div id="pro-legend" style="display:flex;gap:14px;margin-top:8px;font-size:9px;font-family:var(--mono);color:var(--t3)">
+      <div class="card" id="pro-signal-card" style="margin-bottom:8px;display:none">
+        <div id="pro-signal-banner"></div>
+        <div class="pro-actions">
+          <button class="btn-sell" id="pro-buy-btn" onclick="proBuyNow()">🟢 Buy Now</button>
+          <button class="wlt-del" id="pro-release-btn" onclick="releaseLock()" style="border:1px solid var(--border);border-radius:7px;padding:9px 14px">🔓 Stop following</button>
+        </div>
+      </div>
+
+      <div class="card" id="pro-chart-card" style="display:none">
+        <div class="pro-chart-head">
+          <span id="pro-live-dot" class="live-dot"></span>
+          <span id="pro-chart-title" style="font-size:10px;font-weight:700;font-family:var(--mono)">—</span>
+          <span id="pro-chart-price" style="font-size:13px;font-weight:800;font-family:var(--mono);margin-left:auto">—</span>
+        </div>
+        <div style="position:relative">
+          <canvas id="pro-canvas" style="width:100%;height:280px;display:block"></canvas>
+        </div>
+        <div id="pro-legend" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:8px;font-family:var(--mono);color:var(--t3)">
           <span><span style="color:var(--green)">●</span> BUY</span>
           <span><span style="color:var(--red)">●</span> SELL</span>
+          <span><span style="color:#f59e0b">━</span> VWAP</span>
+          <span><span style="color:#60a5fa">━</span> 9 EMA</span>
+          <span><span style="color:#c084fc">━</span> 20 EMA</span>
         </div>
       </div>
 
-      <div class="card" id="pro-no-trade-card" style="margin-top:8px;display:none">
-        <div class="empty">No active trade right now — the chart will appear here once one starts, or override the pick above.</div>
+      <div class="card" id="pro-no-trade-card">
+        <div class="empty">Type a ticker above and tap Watch to see its live VWAP/EMA signal.</div>
       </div>
     </div>
   </div>
@@ -908,39 +941,127 @@ function drawCandles(bars){
 setInterval(()=>{if(chartVisible&&currentChartSymbol)loadChart(currentChartSymbol);},15000);
 
 // ── ABIY PRO LIVE TAB ────────────────────────────────────────────────
-let proSymbol=null, proOverride=null;
+let proSymbol=null, proLocked=null;
+async function watchSymbol(){
+  const inp=document.getElementById('pro-override-inp');
+  const sym=inp.value.trim().toUpperCase().replace(/[^A-Z]/g,'');
+  if(!sym)return;
+  try{
+    await authFetch('/pro-watch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})});
+    proSymbol=sym; inp.value='';
+    document.getElementById('pro-no-trade-card').style.display='none';
+    refreshProLive();
+  }catch(e){toast('❌ Failed to watch '+sym);}
+}
+async function proBuyNow(){
+  if(!proSymbol)return;
+  try{
+    const d=await(await authFetch('/pro-buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:proSymbol})})).json();
+    toast(d.ok?'✅ Bought '+proSymbol+' — bot takes over from here':'❌ '+d.msg);
+    setTimeout(refreshProLive,1500);
+  }catch(e){toast('❌ Failed');}
+}
+async function releaseLock(){
+  if(!confirm('Stop auto-trading '+(proLocked||proSymbol)+'? You can watch a different stock after.'))return;
+  try{
+    await authFetch('/pro-release',{method:'POST'});
+    proLocked=null; proSymbol=null;
+    document.getElementById('pro-signal-card').style.display='none';
+    document.getElementById('pro-chart-card').style.display='none';
+    document.getElementById('pro-no-trade-card').style.display='block';
+    document.getElementById('pro-sym-badge').textContent='No symbol watched';
+    toast('🔓 Released — pick a new stock to watch');
+  }catch(e){}
+}
 async function refreshProLive(){
   try{
     const status=await(await authFetch('/paper-status')).json();
+    proLocked=status.pro_locked_symbol||null;
     const active=status.active;
-    const sym=proOverride || (active ? active.symbol : null);
+    const sym=proLocked || proSymbol || (active && active.symbol) || null;
     proSymbol=sym;
-    document.getElementById('pro-sym-badge').textContent=sym||'No active trade';
-    const noCard=document.getElementById('pro-no-trade-card');
-    const chartCard=document.getElementById('pro-chart-card');
-    if(!sym){ if(noCard)noCard.style.display='block'; if(chartCard)chartCard.style.display='none'; return; }
-    if(noCard)noCard.style.display='none'; if(chartCard)chartCard.style.display='block';
-    const [candlesD, markersD]=await Promise.all([
+    if(!sym){
+      document.getElementById('pro-no-trade-card').style.display='block';
+      document.getElementById('pro-signal-card').style.display='none';
+      document.getElementById('pro-chart-card').style.display='none';
+      document.getElementById('pro-sym-badge').textContent='No symbol watched';
+      return;
+    }
+    document.getElementById('pro-no-trade-card').style.display='none';
+    document.getElementById('pro-chart-card').style.display='block';
+    document.getElementById('pro-sym-badge').textContent=proLocked ? sym+' (auto-trading)' : sym+' (watching)';
+    document.getElementById('pro-chart-title').textContent=sym;
+
+    const [sigD, candlesD, markersD]=await Promise.all([
+      authFetch('/pro-signal?symbol='+sym).then(r=>r.json()),
       authFetch('/candles?symbol='+sym).then(r=>r.json()),
       authFetch('/trade-markers?symbol='+sym).then(r=>r.json())
     ]);
-    drawProChart(candlesD.bars||[], markersD.markers||[]);
+    const sig=sigD.signal;
+    const sigCard=document.getElementById('pro-signal-card');
+    const buyBtn=document.getElementById('pro-buy-btn');
+    const releaseBtn=document.getElementById('pro-release-btn');
+    sigCard.style.display='block';
+    releaseBtn.style.display = proLocked ? 'block' : 'none';
+    if(sig){
+      const cls = sig.signal==='BUY'?'pro-sig-buy':sig.signal==='SELL'?'pro-sig-sell':'pro-sig-wait';
+      const icon = sig.signal==='BUY'?'🟢':sig.signal==='SELL'?'🔴':'⚪';
+      document.getElementById('pro-signal-banner').innerHTML=
+        `<div class="pro-sig-banner ${cls}"><span class="pro-sig-icon">${icon}</span>
+         <div class="pro-sig-text"><div class="pro-sig-label">${sig.signal} SIGNAL</div><div class="pro-sig-reason">${sig.reason}</div></div></div>`;
+      document.getElementById('pro-chart-price').textContent='$'+sig.price.toFixed(2);
+      document.getElementById('pro-chart-price').style.color = sig.price>=sig.vwap ? 'var(--green)' : 'var(--red)';
+      if(active && active.symbol===sym){
+        buyBtn.style.display='none'; // already in a position on this symbol
+      }else{
+        buyBtn.style.display='block';
+        buyBtn.disabled = sig.signal!=='BUY';
+        buyBtn.style.opacity = sig.signal==='BUY' ? '1' : '0.45';
+        buyBtn.textContent = sig.signal==='BUY' ? '🟢 Buy Now' : (sig.signal==='WAIT' ? '⚪ Wait for signal' : '🔴 Not a buy zone');
+      }
+    }
+    drawProChart(candlesD.bars||[], markersD.markers||[], sig);
   }catch(e){}
 }
-function drawProChart(bars, markers){
+function drawProChart(bars, markers, sig){
   const canvas=document.getElementById('pro-canvas');
   if(!canvas) return;
-  const w=canvas.clientWidth||600, h=260;
-  canvas.width=w; canvas.height=h;
+  const w=canvas.clientWidth||600, h=280;
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=w*dpr; canvas.height=h*dpr;
+  canvas.style.width=w+'px'; canvas.style.height=h+'px';
   const ctx=canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,w,h);
-  if(!bars.length){ctx.fillStyle='#475569';ctx.font='11px monospace';ctx.fillText('No chart data yet...',12,h/2);return;}
-  const highs=bars.map(b=>b.h), lows=bars.map(b=>b.l);
-  const max=Math.max(...highs), min=Math.min(...lows), range=(max-min)||1;
-  const cw=w/bars.length;
+  if(!bars.length){ctx.fillStyle='#475569';ctx.font='11px monospace';ctx.fillText('No chart data yet — markets may be closed',12,h/2);return;}
+
+  const padL=4, padR=52, padT=10, padB=22;
+  const plotW=w-padL-padR, plotH=h-padT-padB;
+  const allVals=bars.map(b=>b.h).concat(bars.map(b=>b.l));
+  if(sig){ allVals.push(sig.vwap, sig.ema9, sig.ema20); }
+  const max=Math.max(...allVals), min=Math.min(...allVals), range=(max-min)||1;
+  const cw=plotW/bars.length;
+  const yOf = v => padT + plotH - ((v-min)/range*plotH);
+
+  // Gridlines + price axis labels (4 levels)
+  ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.fillStyle='#64748b'; ctx.font='9px monospace'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const v=min+range*i/4, y=yOf(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.fillText('$'+v.toFixed(2), w-padR+4, y+3);
+  }
+  // Time axis labels (a few ticks)
+  const tickEvery=Math.max(1,Math.floor(bars.length/5));
   bars.forEach((b,i)=>{
-    const x=i*cw+cw/2;
-    const yO=h-((b.o-min)/range*h), yC=h-((b.c-min)/range*h), yH=h-((b.h-min)/range*h), yL=h-((b.l-min)/range*h);
+    if(i%tickEvery===0 && b.hm){
+      ctx.fillText(b.hm, padL+i*cw+2, h-6);
+    }
+  });
+
+  // Candles
+  bars.forEach((b,i)=>{
+    const x=padL+i*cw+cw/2;
+    const yO=yOf(b.o), yC=yOf(b.c), yH=yOf(b.h), yL=yOf(b.l);
     const up=b.c>=b.o;
     ctx.strokeStyle=up?'#34d399':'#f87171'; ctx.fillStyle=up?'#34d399':'#f87171';
     ctx.lineWidth=1;
@@ -948,34 +1069,38 @@ function drawProChart(bars, markers){
     const bw=Math.max(cw*0.7,1);
     ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(Math.abs(yC-yO),1));
   });
+
+  // VWAP + EMA overlays
+  if(sig && sig.vwap_series && sig.vwap_series.length===bars.length){
+    const drawLine=(series,color)=>{
+      ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.beginPath();
+      series.forEach((v,i)=>{ const x=padL+i*cw+cw/2, y=yOf(v); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+      ctx.stroke();
+    };
+    drawLine(sig.vwap_series, '#f59e0b');
+    drawLine(sig.ema9_series, '#60a5fa');
+    drawLine(sig.ema20_series, '#c084fc');
+  }
+
+  // Current price dashed line
+  if(bars.length){
+    const lastClose=bars[bars.length-1].c, y=yOf(lastClose);
+    ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  // BUY/SELL markers
   markers.forEach(m=>{
-    const hm=(m.time||'').split(' ')[0]; // strip " ET" suffix
+    const hm=(m.time||'').split(' ')[0];
     let idx=bars.findIndex(b=>b.hm===hm);
     if(idx<0) idx = m.type==='buy' ? 0 : bars.length-1;
-    const x=idx*cw+cw/2;
-    const y=h-((m.price-min)/range*h);
+    const x=padL+idx*cw+cw/2, y=yOf(m.price);
     const col = m.type==='buy' ? '#34d399' : '#f87171';
     ctx.fillStyle=col;
     ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
     ctx.font='9px monospace'; ctx.fillStyle=col;
-    ctx.fillText(m.type==='buy'?'BUY':'SELL', Math.max(2,x-12), m.type==='buy' ? Math.min(h-2,y+16) : Math.max(10,y-8));
+    ctx.fillText(m.type==='buy'?'BUY':'SELL', Math.max(2,x-12), m.type==='buy' ? Math.min(h-padB-2,y+16) : Math.max(padT+10,y-8));
   });
-}
-async function overridePick(){
-  const inp=document.getElementById('pro-override-inp');
-  const sym=inp.value.trim().toUpperCase().replace(/[^A-Z]/g,'');
-  if(!sym)return;
-  try{
-    const status=await(await authFetch('/paper-status')).json();
-    if(status.active && status.active.symbol!==sym){
-      if(!confirm('This closes '+status.active.symbol+' and enters '+sym+' instead. Continue?'))return;
-      await authFetch('/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:status.active.symbol,reason:'manual'})});
-    }
-    const d=await(await authFetch('/enter-now',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})).json();
-    toast(d.ok?'✅ Entered '+sym:'❌ '+d.msg);
-    proOverride=sym; inp.value='';
-    setTimeout(refreshProLive,1500);
-  }catch(e){toast('❌ Failed');}
 }
 setInterval(()=>{if(document.getElementById('tab-prolive').classList.contains('active'))refreshProLive();},4000);
 
