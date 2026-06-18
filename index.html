@@ -103,12 +103,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 }
 
 /* Market trio */
-.mkt-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;grid-column:1/-1}
-.mkt-tile{background:var(--bg2);border:1px solid var(--border);border-radius:9px;padding:9px 10px;position:relative;overflow:hidden}
-.mkt-tile::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
-.tb::before{background:linear-gradient(90deg,var(--green),var(--g2))}
-.tr::before{background:linear-gradient(90deg,var(--red),#dc2626)}
-.tf::before{background:linear-gradient(90deg,var(--amber),#d97706)}
+.mkt-strip{display:flex;gap:0;grid-column:1/-1;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;align-items:center}
+.mkt-mini{display:flex;align-items:center;gap:6px;flex:1;padding:0 6px}
+.mkt-mini+.mkt-mini{border-left:1px solid var(--border)}
+.mkt-mini-sym{font-size:8px;font-weight:700;color:var(--t3);font-family:var(--mono)}
+.mkt-mini-p{font-size:11px;font-weight:700;font-family:var(--mono)}
+.mkt-mini-c{font-size:9px;font-family:var(--mono);margin-left:auto}
+
 .msym{font-family:var(--mono);font-size:8px;font-weight:700;color:var(--t3);margin-bottom:2px}
 .mp{font-family:var(--mono);font-size:14px;font-weight:700;line-height:1;margin-bottom:1px}
 .mc{font-family:var(--mono);font-size:9px;margin-bottom:2px}
@@ -242,6 +243,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 /* ══ CHAT PAGE ═══════════════════════════════════════════════ */
 /* ══ WATCHLIST TAB ═══════════════════════════════════════════ */
 .wl-page{padding:9px;height:100%;overflow-y:auto}
+.pro-page{padding:9px;height:100%;overflow-y:auto}
 .wlt-stocks{display:flex;flex-direction:column;gap:7px}
 .wlt-card{background:var(--bg2);border:1.5px solid var(--border);border-radius:9px;padding:11px 13px}
 .wlt-card.qualifies{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.03)}
@@ -326,6 +328,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 <div class="tabs" id="tabs">
   <button class="tab active" onclick="switchTab('trade',this)">📈 AutoTrade</button>
   <button class="tab" onclick="switchTab('watchlist',this)">⭐ Watchlist</button>
+  <button class="tab" onclick="switchTab('prolive',this)">🎯 Abiy PRO Live</button>
   <button class="tab" onclick="switchTab('chat',this)">💬 AI Chat</button>
 </div>
 
@@ -337,10 +340,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     <div class="trade-page">
 
       <!-- Market trio (full width) -->
-      <div class="mkt-grid">
-        <div class="mkt-tile" id="t-spy"><div class="msym">SPY</div><div class="mp" id="spy-p">—</div><div class="mc" id="spy-c">—</div><span class="msig" id="spy-s">—</span></div>
-        <div class="mkt-tile" id="t-qqq"><div class="msym">QQQ</div><div class="mp" id="qqq-p">—</div><div class="mc" id="qqq-c">—</div><span class="msig" id="qqq-s">—</span></div>
-        <div class="mkt-tile" id="t-btc"><div class="msym" style="color:var(--amber)">BTC</div><div class="mp" id="btc-p" style="color:var(--amber)">—</div><div class="mc" id="btc-c">—</div><span class="msig" id="btc-s">—</span></div>
+      <div class="mkt-strip">
+        <div class="mkt-mini"><span class="mkt-mini-sym">SPY</span><span class="mkt-mini-p" id="spy-p">—</span><span class="mkt-mini-c" id="spy-c">—</span></div>
+        <div class="mkt-mini"><span class="mkt-mini-sym">QQQ</span><span class="mkt-mini-p" id="qqq-p">—</span><span class="mkt-mini-c" id="qqq-c">—</span></div>
+        <div class="mkt-mini"><span class="mkt-mini-sym" style="color:var(--amber)">BTC</span><span class="mkt-mini-p" id="btc-p" style="color:var(--amber)">—</span><span class="mkt-mini-c" id="btc-c">—</span></div>
       </div>
 
       <!-- Signal bar (full width) -->
@@ -377,6 +380,20 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         </div>
         <!-- Completed trades -->
         <div id="hist-body"></div>
+
+        <!-- Whale activity heuristic -->
+        <div class="card">
+          <div class="card-t">🐋 Whale Activity <span class="cbadge" id="whale-badge">—</span></div>
+          <div style="font-size:8px;color:var(--t3);font-family:var(--mono);margin-bottom:7px">Volume-surge estimate, not real Level 2/dark-pool data</div>
+          <div id="whale-body"><div class="empty">No unusual volume detected right now</div></div>
+        </div>
+
+        <!-- All-time performance -->
+        <div class="card">
+          <div class="card-t">📊 All-Time Performance</div>
+          <div id="perf-body"><div class="empty">No trades recorded yet</div></div>
+        </div>
+
         <!-- Controls -->
         <div class="ctrl-row">
           <button class="cbtn cbtn-g" onclick="forcePick()" id="btn-pick">🔍 Force Pick</button>
@@ -438,6 +455,36 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     </div>
   </div>
 
+  <!-- ABIY PRO LIVE TAB -->
+  <div class="tab-page" id="tab-prolive">
+    <div class="pro-page">
+      <div class="card" style="margin-bottom:8px">
+        <div class="card-t">🎯 Abiy PRO Day Trade — Live <span class="cbadge" id="pro-sym-badge">—</span></div>
+        <div style="font-size:9px;color:var(--t2);line-height:1.6;margin-bottom:8px">
+          Live price for whatever's currently active (or your override below).
+          Green BUY / red SELL markers show real entries and exits as they happen —
+          buy dips, sell rips, rotate, repeat.
+        </div>
+        <div class="wl-add-row" style="margin-bottom:0">
+          <input class="wl-inp" id="pro-override-inp" placeholder="Type a ticker to override the pick..." maxlength="6" onkeydown="if(event.key==='Enter')overridePick()" style="font-size:12px;padding:8px 10px">
+          <button class="wl-btn-add" onclick="overridePick()" style="padding:8px 14px;font-size:12px">Use This</button>
+        </div>
+      </div>
+
+      <div class="card" id="pro-chart-card">
+        <canvas id="pro-canvas" style="width:100%;height:260px;display:block"></canvas>
+        <div id="pro-legend" style="display:flex;gap:14px;margin-top:8px;font-size:9px;font-family:var(--mono);color:var(--t3)">
+          <span><span style="color:var(--green)">●</span> BUY</span>
+          <span><span style="color:var(--red)">●</span> SELL</span>
+        </div>
+      </div>
+
+      <div class="card" id="pro-no-trade-card" style="margin-top:8px;display:none">
+        <div class="empty">No active trade right now — the chart will appear here once one starts, or override the pick above.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- CHAT TAB -->
   <div class="tab-page" id="tab-chat">
     <div class="chat-page">
@@ -462,6 +509,48 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </div><!-- /content -->
 
 <script>
+// ── ACCESS CODE (optional gate — only active if ABIY_PIN is set on the server) ──
+let authToken = localStorage.getItem('autotrade_token') || '';
+async function authFetch(url, opts={}){
+  opts.headers = Object.assign({}, opts.headers, authToken ? {'X-Auth': authToken} : {});
+  const r = await fetch(url, opts);
+  if(r.status === 401){
+    showLockScreen();
+    throw new Error('locked');
+  }
+  return r;
+}
+function showLockScreen(){
+  if(document.getElementById('lock-screen')) return;
+  const div = document.createElement('div');
+  div.id = 'lock-screen';
+  div.style = 'position:fixed;inset:0;background:#07100e;display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:14px;font-family:Inter,sans-serif';
+  div.innerHTML = `
+    <div style="font-size:28px">🔒</div>
+    <div style="color:#e2e8f0;font-size:14px;font-weight:700">AutoTrade Pro — Enter your code</div>
+    <input id="lock-pin" type="password" placeholder="Your code" style="background:#131f1c;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:10px 14px;color:#e2e8f0;font-size:14px;text-align:center;width:200px" onkeydown="if(event.key==='Enter')submitLockPin()">
+    <button onclick="submitLockPin()" style="background:#34d399;color:#07100e;border:none;border-radius:8px;padding:10px 24px;font-weight:700;cursor:pointer">Unlock</button>
+    <div id="lock-err" style="color:#f87171;font-size:11px"></div>
+  `;
+  document.body.appendChild(div);
+}
+async function submitLockPin(){
+  const pin = document.getElementById('lock-pin').value;
+  try{
+    const r = await fetch('/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});
+    const d = await r.json();
+    if(d.ok){
+      authToken = d.token; localStorage.setItem('autotrade_token', authToken);
+      document.getElementById('lock-screen')?.remove();
+      location.reload();
+    }else{
+      document.getElementById('lock-err').textContent = d.msg || 'Incorrect code';
+    }
+  }catch(e){ document.getElementById('lock-err').textContent = 'Connection error'; }
+}
+// Probe once on load — if the server has a PIN set and we have no/bad token, this 401s and shows the lock screen
+authFetch('/paper-status').catch(()=>{});
+
 // ── LAYOUT: fix content height based on header elements ──────────────
 let alertVisible = false;
 function fixLayout(){
@@ -485,6 +574,7 @@ function switchTab(name,el){
   el.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
   if(name==='watchlist')refreshWLT();
+  if(name==='prolive')refreshProLive();
 }
 
 // ── CLOCK ─────────────────────────────────────────────────────────────
@@ -506,7 +596,7 @@ function sigLbl(c){return c>0.4?'📈 BULL':c<-0.4?'📉 BEAR':'➡ FLAT';}
 function tileCls(c){return c>0.4?'tb':c<-0.4?'tr':'tf';}
 async function refreshPrices(){
   try{
-    const d=await(await fetch('/prices')).json();
+    const d=await(await authFetch('/prices')).json();
     const cache=d.data||{},ts=d.updated||'—';
     const srcEl=document.getElementById('data-src');
     if(srcEl){
@@ -516,11 +606,9 @@ async function refreshPrices(){
     const map={'QQQ':'qqq','SPY':'spy','BTC-USD':'btc'};
     Object.entries(map).forEach(([sym,key])=>{
       const q=cache[sym];if(!q)return;
-      const pe=document.getElementById(key+'-p'),ce=document.getElementById(key+'-c'),se=document.getElementById(key+'-s'),tile=document.getElementById('t-'+key);
-      if(pe){pe.textContent=sym==='BTC-USD'?'$'+Number(q.price).toLocaleString('en-US',{maximumFractionDigits:0}):'$'+q.price.toFixed(2);pe.style.color=q.pct>=0?'var(--green)':'var(--red)';}
-      if(ce){ce.textContent=(q.pct>=0?'+':'')+q.pct.toFixed(2)+'%';ce.className='mc '+(q.pct>=0?'cu':'cd');}
-      if(se){se.textContent=sigLbl(q.pct);se.className='msig '+sigCls(q.pct);}
-      if(tile)tile.className='mkt-tile '+tileCls(q.pct);
+      const pe=document.getElementById(key+'-p'),ce=document.getElementById(key+'-c');
+      if(pe){pe.textContent=sym==='BTC-USD'?'$'+Number(q.price).toLocaleString('en-US',{maximumFractionDigits:0}):'$'+q.price.toFixed(2);pe.style.color=sym==='BTC-USD'?'var(--amber)':(q.pct>=0?'var(--green)':'var(--red)');}
+      if(ce){ce.textContent=(q.pct>=0?'+':'')+q.pct.toFixed(2)+'%';ce.style.color=q.pct>=0?'var(--green)':'var(--red)';}
     });
     updateWLPrices(cache);
   }catch(e){}
@@ -532,7 +620,7 @@ let alertDismissed=false;
 async function checkAlert(){
   if(alertDismissed)return;
   try{
-    const d=await(await fetch('/market-alert')).json();
+    const d=await(await authFetch('/market-alert')).json();
     const alert=d.alert;
     const hazard=document.getElementById('hazard');
     const banner=document.getElementById('alert-banner');
@@ -585,7 +673,7 @@ function scCls(s){return s>=70?'color:var(--green)':s>=50?'color:var(--amber)':'
 
 async function refreshStatus(){
   try{
-    const d=await(await fetch('/paper-status')).json();
+    const d=await(await authFetch('/paper-status')).json();
     const maxT=d.max_trades||8;
     // P&L
     document.getElementById('cap-s').textContent='$'+(d.starting_capital||10000).toFixed(2);
@@ -715,18 +803,62 @@ function showTradeAlert(alert){
 // ── SIMULATED OPTIONS CANDIDATES ─────────────────────────────────────
 async function refreshOptions(){
   try{
-    const d=await(await fetch('/options-status')).json();
+    const d=await(await authFetch('/options-status')).json();
     const cands=d.candidates||[];
     document.getElementById('opt-badge').textContent=cands.length+'/'+(d.max_slots||3);
     const body=document.getElementById('opt-body');
     if(!cands.length){body.innerHTML='<div class="empty">No candidates tracked yet</div>';return;}
     body.innerHTML=cands.map(c=>{
       const pct=c.sim_pnl_pct||0,pos=pct>=0;
-      return `<div class="opt-item"><div><div class="opt-sym">${c.symbol}</div><div class="opt-meta">$${c.entry_underlying.toFixed(2)}→$${(c.current_underlying||c.entry_underlying).toFixed(2)}</div></div><div class="opt-pnl" style="color:${pos?'var(--green)':'var(--red)'}">${pos?'+':''}${pct.toFixed(0)}%</div></div>`;
+      const tag=c.is_real?'<span style="color:var(--green);font-size:7px">REAL</span>':'<span style="color:var(--t3);font-size:7px">SIM</span>';
+      const meta=c.is_real?`${c.contract||''} $${(c.entry_premium||0).toFixed(2)}→$${(c.current_premium||0).toFixed(2)}`:`$${c.entry_underlying.toFixed(2)}→$${(c.current_underlying||c.entry_underlying).toFixed(2)}`;
+      return `<div class="opt-item"><div><div class="opt-sym">${c.symbol} ${tag}</div><div class="opt-meta">${meta}</div></div><div class="opt-pnl" style="color:${pos?'var(--green)':'var(--red)'}">${pos?'+':''}${pct.toFixed(0)}%</div></div>`;
     }).join('');
   }catch(e){}
 }
 refreshOptions();setInterval(refreshOptions,4000);
+
+// ── WHALE ACTIVITY (heuristic) ──────────────────────────────────────
+async function refreshWhale(){
+  try{
+    const d=await(await authFetch('/whale-activity')).json();
+    const whales=d.whales||[];
+    const badge=document.getElementById('whale-badge');
+    const body=document.getElementById('whale-body');
+    if(!whales.length){badge.textContent='Quiet';body.innerHTML='<div class="empty">No unusual volume detected right now</div>';return;}
+    badge.textContent=whales.length+' detected';
+    body.innerHTML=whales.map(w=>{
+      const buying=w.direction==='buying';
+      return `<div class="opt-item" style="border-left-color:${buying?'var(--green)':'var(--red)'}">
+        <div><div class="opt-sym">${w.symbol}</div><div class="opt-meta">vol ${w.vol_ratio.toFixed(1)}x · chg ${w.change_pct>=0?'+':''}${w.change_pct.toFixed(1)}%</div></div>
+        <div class="opt-pnl" style="color:${buying?'var(--green)':'var(--red)'}">${buying?'🐋 BUYING':'🐋 SELLING'}</div>
+      </div>`;
+    }).join('');
+  }catch(e){}
+}
+refreshWhale();setInterval(refreshWhale,15000);
+
+// ── ALL-TIME PERFORMANCE ────────────────────────────────────────────
+async function refreshPerf(){
+  try{
+    const d=await(await authFetch('/performance')).json();
+    const body=document.getElementById('perf-body');
+    if(!d.trades){body.innerHTML='<div class="empty">No trades recorded yet</div>';return;}
+    const reasons=Object.entries(d.by_reason||{}).map(([k,v])=>`${k.replace('_',' ')}: ${v}`).join(' · ');
+    body.innerHTML=`
+      <div class="wlt-stats" style="grid-template-columns:repeat(2,1fr);margin-bottom:6px">
+        <div class="wlt-stat"><div class="wlt-stat-lbl">Trades</div><div class="wlt-stat-val">${d.trades}</div></div>
+        <div class="wlt-stat"><div class="wlt-stat-lbl">Win Rate</div><div class="wlt-stat-val" style="color:${d.win_rate>=50?'var(--green)':'var(--red)'}">${d.win_rate}%</div></div>
+        <div class="wlt-stat"><div class="wlt-stat-lbl">Avg Win</div><div class="wlt-stat-val" style="color:var(--green)">+$${d.avg_win}</div></div>
+        <div class="wlt-stat"><div class="wlt-stat-lbl">Avg Loss</div><div class="wlt-stat-val" style="color:var(--red)">$${d.avg_loss}</div></div>
+      </div>
+      <div style="font-size:8px;color:var(--t3);font-family:var(--mono);line-height:1.6">
+        Best: ${d.best?d.best.symbol+' '+(d.best.pnl_pct>=0?'+':'')+d.best.pnl_pct+'%':'—'} ·
+        Worst: ${d.worst?d.worst.symbol+' '+d.worst.pnl_pct+'%':'—'}<br>${reasons}
+      </div>`;
+  }catch(e){}
+}
+refreshPerf();setInterval(refreshPerf,30000);
 
 // ── CANDLESTICK CHART (click-to-show) ──────────────────────────────────
 let chartVisible=false, currentChartSymbol=null;
@@ -747,7 +879,7 @@ function hideChart(){
 }
 async function loadChart(sym){
   try{
-    const d=await(await fetch('/candles?symbol='+sym)).json();
+    const d=await(await authFetch('/candles?symbol='+sym)).json();
     drawCandles(d.bars||[]);
   }catch(e){}
 }
@@ -775,10 +907,82 @@ function drawCandles(bars){
 }
 setInterval(()=>{if(chartVisible&&currentChartSymbol)loadChart(currentChartSymbol);},15000);
 
+// ── ABIY PRO LIVE TAB ────────────────────────────────────────────────
+let proSymbol=null, proOverride=null;
+async function refreshProLive(){
+  try{
+    const status=await(await authFetch('/paper-status')).json();
+    const active=status.active;
+    const sym=proOverride || (active ? active.symbol : null);
+    proSymbol=sym;
+    document.getElementById('pro-sym-badge').textContent=sym||'No active trade';
+    const noCard=document.getElementById('pro-no-trade-card');
+    const chartCard=document.getElementById('pro-chart-card');
+    if(!sym){ if(noCard)noCard.style.display='block'; if(chartCard)chartCard.style.display='none'; return; }
+    if(noCard)noCard.style.display='none'; if(chartCard)chartCard.style.display='block';
+    const [candlesD, markersD]=await Promise.all([
+      authFetch('/candles?symbol='+sym).then(r=>r.json()),
+      authFetch('/trade-markers?symbol='+sym).then(r=>r.json())
+    ]);
+    drawProChart(candlesD.bars||[], markersD.markers||[]);
+  }catch(e){}
+}
+function drawProChart(bars, markers){
+  const canvas=document.getElementById('pro-canvas');
+  if(!canvas) return;
+  const w=canvas.clientWidth||600, h=260;
+  canvas.width=w; canvas.height=h;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  if(!bars.length){ctx.fillStyle='#475569';ctx.font='11px monospace';ctx.fillText('No chart data yet...',12,h/2);return;}
+  const highs=bars.map(b=>b.h), lows=bars.map(b=>b.l);
+  const max=Math.max(...highs), min=Math.min(...lows), range=(max-min)||1;
+  const cw=w/bars.length;
+  bars.forEach((b,i)=>{
+    const x=i*cw+cw/2;
+    const yO=h-((b.o-min)/range*h), yC=h-((b.c-min)/range*h), yH=h-((b.h-min)/range*h), yL=h-((b.l-min)/range*h);
+    const up=b.c>=b.o;
+    ctx.strokeStyle=up?'#34d399':'#f87171'; ctx.fillStyle=up?'#34d399':'#f87171';
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,yH); ctx.lineTo(x,yL); ctx.stroke();
+    const bw=Math.max(cw*0.7,1);
+    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(Math.abs(yC-yO),1));
+  });
+  markers.forEach(m=>{
+    const hm=(m.time||'').split(' ')[0]; // strip " ET" suffix
+    let idx=bars.findIndex(b=>b.hm===hm);
+    if(idx<0) idx = m.type==='buy' ? 0 : bars.length-1;
+    const x=idx*cw+cw/2;
+    const y=h-((m.price-min)/range*h);
+    const col = m.type==='buy' ? '#34d399' : '#f87171';
+    ctx.fillStyle=col;
+    ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
+    ctx.font='9px monospace'; ctx.fillStyle=col;
+    ctx.fillText(m.type==='buy'?'BUY':'SELL', Math.max(2,x-12), m.type==='buy' ? Math.min(h-2,y+16) : Math.max(10,y-8));
+  });
+}
+async function overridePick(){
+  const inp=document.getElementById('pro-override-inp');
+  const sym=inp.value.trim().toUpperCase().replace(/[^A-Z]/g,'');
+  if(!sym)return;
+  try{
+    const status=await(await authFetch('/paper-status')).json();
+    if(status.active && status.active.symbol!==sym){
+      if(!confirm('This closes '+status.active.symbol+' and enters '+sym+' instead. Continue?'))return;
+      await authFetch('/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:status.active.symbol,reason:'manual'})});
+    }
+    const d=await(await authFetch('/enter-now',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})).json();
+    toast(d.ok?'✅ Entered '+sym:'❌ '+d.msg);
+    proOverride=sym; inp.value='';
+    setTimeout(refreshProLive,1500);
+  }catch(e){toast('❌ Failed');}
+}
+setInterval(()=>{if(document.getElementById('tab-prolive').classList.contains('active'))refreshProLive();},4000);
+
 // ── WATCHLIST ─────────────────────────────────────────────────────────
 let myWL=[];
 async function loadWL(){
-  try{const d=await(await fetch('/watchlist')).json();myWL=d.symbols||[];renderWL();}catch(e){}
+  try{const d=await(await authFetch('/watchlist')).json();myWL=d.symbols||[];renderWL();}catch(e){}
 }
 loadWL();
 
@@ -819,7 +1023,7 @@ async function quickAdd(sym){
   myWL.push(sym);await saveWL();renderWL();toast('Added '+sym);refreshWLT();
 }
 async function saveWL(){
-  try{await fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:myWL})});}catch(e){}
+  try{await authFetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:myWL})});}catch(e){}
 }
 
 // ── DEDICATED WATCHLIST TAB ──────────────────────────────────────────
@@ -847,7 +1051,7 @@ async function refreshWLT(){
     return;
   }
   try{
-    const d=await(await fetch('/watchlist-status')).json();
+    const d=await(await authFetch('/watchlist-status')).json();
     const stocks=d.stocks||[];
     body.innerHTML=stocks.map(s=>{
       const up=s.change_pct>=0;
@@ -875,20 +1079,20 @@ setInterval(()=>{if(document.getElementById('tab-watchlist').classList.contains(
 async function enterNow(sym){
   if(!confirm('Enter '+sym+' NOW?'))return;
   try{
-    const d=await(await fetch('/enter-now',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})).json();
+    const d=await(await authFetch('/enter-now',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})).json();
     toast(d.ok?'✅ Entered '+sym:'❌ '+d.msg);setTimeout(refreshStatus,2000);
   }catch(e){toast('❌ Failed');}
 }
 async function skipStock(sym){
   try{
-    await fetch('/skip-stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})});
+    await authFetch('/skip-stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})});
     toast('⏭ Skipped — scanning next...');setTimeout(refreshStatus,5000);
   }catch(e){}
 }
 async function closeTrade(sym){
   if(!confirm('Close '+sym+' at market price NOW?'))return;
   try{
-    const d=await(await fetch('/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym,reason:'manual'})})).json();
+    const d=await(await authFetch('/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym,reason:'manual'})})).json();
     toast(d.ok?'✅ '+d.msg:'❌ '+d.msg);setTimeout(refreshStatus,1500);
   }catch(e){toast('❌ Failed — check connection');}
 }
@@ -901,19 +1105,19 @@ function toast(msg){
 async function forcePick(){
   if(!confirm('Run morning scan now? Resets today.'))return;
   const btn=document.getElementById('btn-pick');btn.disabled=true;btn.textContent='Scanning...';
-  try{await fetch('/paper-force-pick');toast('🔍 Scanning! Telegram in ~2 min');setTimeout(refreshStatus,8000);}
+  try{await authFetch('/paper-force-pick');toast('🔍 Scanning! Telegram in ~2 min');setTimeout(refreshStatus,8000);}
   catch(e){toast('❌ Failed');}
   setTimeout(()=>{btn.disabled=false;btn.textContent='🔍 Force Pick';},6000);
 }
 async function testTg(){
   const btn=document.getElementById('btn-tg');btn.disabled=true;btn.textContent='Sending...';
-  try{const d=await(await fetch('/test-telegram')).json();toast(d.ok?'✅ Sent!':'❌ Failed');}
+  try{const d=await(await authFetch('/test-telegram')).json();toast(d.ok?'✅ Sent!':'❌ Failed');}
   catch(e){toast('❌ Failed');}
   setTimeout(()=>{btn.disabled=false;btn.textContent='🔔 Telegram';},3000);
 }
 async function resetDay(){
   if(!confirm('Reset today? Clears all trades.'))return;
-  await fetch('/paper-reset');toast('↺ Reset');refreshStatus();
+  await authFetch('/paper-reset');toast('↺ Reset');refreshStatus();
 }
 
 // ── CHAT ──────────────────────────────────────────────────────────────
@@ -927,7 +1131,7 @@ async function sendChat(){
   msgs.scrollTop=msgs.scrollHeight;
   document.getElementById('chat-send').disabled=true;
   try{
-    const d=await(await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})})).json();
+    const d=await(await authFetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})})).json();
     document.getElementById(tid)?.remove();
     addMsg('ai',d.response||'—',null,d.executed);
     if(d.executed)setTimeout(refreshStatus,2000);

@@ -26,7 +26,7 @@ alpaca_data    = None
 if ALPACA_KEY and ALPACA_SECRET:
     try:
         from alpaca.trading.client import TradingClient
-        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestTradeRequest
@@ -36,7 +36,52 @@ if ALPACA_KEY and ALPACA_SECRET:
     except Exception as e:
         print(f"  Alpaca: {e}")
 
+# Real options data (separate, optional) — requires a newer alpaca-py and
+# an account with options market-data entitlement. If either is missing,
+# we fall back to the simulated leverage-proxy tracker further down, and
+# every UI/Telegram label makes clear which mode is actually active.
+alpaca_options_data = None
+ALPACA_OPTIONS_AVAILABLE = False
+if ALPACA_KEY and ALPACA_SECRET:
+    try:
+        from alpaca.data.historical.option import OptionHistoricalDataClient
+        from alpaca.data.requests import OptionChainRequest
+        alpaca_options_data = OptionHistoricalDataClient(ALPACA_KEY, ALPACA_SECRET)
+        ALPACA_OPTIONS_AVAILABLE = True
+        print("  Alpaca options data ✅")
+    except Exception as e:
+        print(f"  Alpaca options data not available, using simulated estimate instead: {e}")
+
 app = Flask(__name__, static_folder='.')
+
+# ── ACCESS CODE (optional) ──────────────────────────────────────────
+# Since this is ONE shared backend, all your devices already see the same
+# live data automatically — there's no real "per-device" data loss, only
+# the restart/persistence issue handled above. This just keeps strangers
+# from opening your public Render URL and touching your trades. Set
+# ABIY_PIN in Render's environment variables to turn it on; leave it
+# unset and the app behaves exactly as before (no gate).
+import hashlib
+ABIY_PIN = os.environ.get('ABIY_PIN', '').strip()
+def _expected_token():
+    return hashlib.sha256((ABIY_PIN + 'autotrade-pro-salt-2026').encode()).hexdigest()
+_PUBLIC_PATHS = {'/', '/ping', '/unlock'}
+
+@app.before_request
+def _check_auth():
+    if not ABIY_PIN or request.path in _PUBLIC_PATHS:
+        return None
+    if request.headers.get('X-Auth','') != _expected_token():
+        return jsonify({'ok':False,'locked':True,'msg':'Enter your code to unlock'}), 401
+
+@app.route('/unlock', methods=['POST'])
+def unlock():
+    if not ABIY_PIN:
+        return cors({'ok':True,'token':'','gated':False})
+    data = request.get_json() or {}
+    if str(data.get('pin','')) == ABIY_PIN:
+        return cors({'ok':True,'token':_expected_token(),'gated':True})
+    return cors({'ok':False,'msg':'Incorrect code'})
 
 # ══════════════════════════════════════════════════════════════════════
 # STOCK UNIVERSE — stocks that ACTUALLY move 10%+ in a day
@@ -98,6 +143,8 @@ RULES = {
     'UNDERPERFORM_MINUTES':   60,  # After 60 min with little movement...
     'UNDERPERFORM_MIN_PCT':   1.5, # ...and gain is under 1.5%...
     'UNDERPERFORM_SCORE_GAP': 15,  # ...rotate if a candidate scores 15+ higher
+    'PREMARKET_ENTRY_ENABLED': True,  # watchlist-only, limit orders, riskier liquidity
+    'PREMARKET_START': (8, 0),        # ET — start of eligible pre-market entry window
 }
 # Simulated options tracker config (educational estimate, NOT real option data)
 OPTIONS_MAX_SLOTS   = 3
@@ -229,6 +276,23 @@ def can_enter():
     ok,sp,qp = market_ok_to_trade()
     if not ok: return False,f"Market bearish (SPY {sp:+.2f}% QQQ {qp:+.2f}%) — protecting capital"
     return True,"OK"
+
+# ── PRE-MARKET ENTRY (watchlist only) ──────────────────────────────────
+# Liquidity and spreads pre-market are much worse for unknown universe
+# stocks — only Abiy's own hand-picked watchlist is eligible here, and
+# entries use a LIMIT order with extended_hours=True since Alpaca rejects
+# market orders outside regular session hours.
+def is_premarket_window():
+    n = datetime.now(ET_TZ); t = n.hour*60 + n.minute
+    start = RULES['PREMARKET_START'][0]*60 + RULES['PREMARKET_START'][1]
+    return n.weekday() < 5 and start <= t < 570
+
+def can_enter_premarket():
+    if not RULES.get('PREMARKET_ENTRY_ENABLED'): return False, "Pre-market entry disabled"
+    if not is_premarket_window(): return False, "Not in pre-market window"
+    if paper['trade_seq'] > RULES['MAX_TRADES_PER_DAY']: return False, "Max trades reached"
+    if not custom_watchlist: return False, "No watchlist symbols set"
+    return True, "OK"
 
 # ── PRO DAY-TRADE SCORING ─────────────────────────────────────────────
 def score_day_trade(q, spy_pct=0, qqq_pct=0):
@@ -458,6 +522,91 @@ def p_log(msg):
 # Approximates an option's P&L as (underlying % move) x OPTIONS_LEVERAGE.
 options_tracker = {'candidates': [], 'completed': []}
 
+# ── PERSISTENCE ──────────────────────────────────────────────────────
+# Render's free tier sleeps after ~15 min of no traffic, which kills this
+# whole Python process — wiping every in-memory variable. That's why trade
+# history was disappearing. STATE_FILE lets today's session survive a
+# restart; HISTORY_FILE is a permanent, ever-growing log across all days
+# for the performance analytics. Neither survives a brand-new code deploy
+# on Render's free tier (ephemeral disk), so Telegram remains the ultimate
+# backup record regardless.
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(DATA_DIR, 'autotrade_state.json')
+HISTORY_FILE = os.path.join(DATA_DIR, 'autotrade_history.json')
+
+def save_state():
+    try:
+        snapshot = {
+            'date': paper['date'], 'capital': paper['capital'],
+            'starting_capital': paper['starting_capital'], 'trade_seq': paper['trade_seq'],
+            'status': paper['status'], 'completed': paper['completed'],
+            'total_pnl': paper['total_pnl'], 'skipped': paper.get('skipped', []),
+            'custom_watchlist': custom_watchlist,
+            'options_completed': options_tracker['completed'],
+        }
+        with open(STATE_FILE, 'w') as f:
+            json.dump(snapshot, f)
+    except Exception as e:
+        print(f"  Save state: {e}")
+
+def load_state():
+    global custom_watchlist
+    if not os.path.exists(STATE_FILE): return
+    try:
+        with open(STATE_FILE) as f:
+            snap = json.load(f)
+    except Exception as e:
+        print(f"  Load state: {e}"); return
+    custom_watchlist = snap.get('custom_watchlist', custom_watchlist)
+    today = datetime.now(ET_TZ).date().isoformat()
+    if snap.get('date') != today:
+        return  # different day — only the watchlist carries forward
+    paper.update({
+        'date': snap['date'], 'capital': snap.get('capital', paper['capital']),
+        'starting_capital': snap.get('starting_capital', paper['starting_capital']),
+        'trade_seq': snap.get('trade_seq', 1), 'completed': snap.get('completed', []),
+        'total_pnl': snap.get('total_pnl', 0.0), 'skipped': snap.get('skipped', []),
+        'status': 'waiting', 'active': {},
+    })
+    options_tracker['completed'] = snap.get('options_completed', [])
+    # Reconcile with Alpaca's REAL open positions — don't trust stale local
+    # state about an active trade, since nothing was monitoring it for
+    # target/stop while the process was asleep.
+    if alpaca_trading:
+        try:
+            positions = alpaca_trading.get_all_positions()
+            if positions:
+                p = positions[0]
+                sym = p.symbol; entry = float(p.avg_entry_price); shares = int(float(p.qty))
+                paper['active'] = {sym: {
+                    'symbol': sym, 'name': sym, 'trade_num': paper['trade_seq'], 'shares': shares,
+                    'entry': round(entry,2), 'cost': round(entry*shares,2),
+                    'target': round(entry*(1+RULES['TARGET_PCT']),2),
+                    'stop': round(entry*(1-RULES['STOP_PCT']),2),
+                    'entry_time': 'resumed after restart', 'current': round(entry,2),
+                    'peak': round(entry,2), 'peak_pnl_pct': 0.0, 'entered_at': time.time(),
+                    'score': 0, 'manual': True, 'via_alpaca': True,
+                }}
+                paper['status'] = 'entered'
+                p_log(f"Reconciled with Alpaca: found live position {sym} {shares}sh @ ${entry:.2f} — resuming monitoring")
+        except Exception as e:
+            print(f"  Reconcile Alpaca positions: {e}")
+    p_log(f"Resumed session from disk: {len(paper['completed'])} trades today, P&L ${paper['total_pnl']:+.2f}")
+
+def append_history(record):
+    """Permanent all-time trade log, separate from the per-day 'completed' list."""
+    try:
+        hist = []
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE) as f:
+                hist = json.load(f)
+        hist.append({**record, 'date': paper.get('date')})
+        hist = hist[-3000:]
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(hist, f)
+    except Exception as e:
+        print(f"  Append history: {e}")
+
 def paper_reset():
     if alpaca_trading:
         try: alpaca_trading.cancel_orders()
@@ -495,8 +644,8 @@ def pick_best(spy_pct=0, qqq_pct=0, force=False, exclude=None):
         return None
     return best
 
-def enter_trade(q, manual=False):
-    if not manual:
+def enter_trade(q, manual=False, bypass_hours=False):
+    if not manual and not bypass_hours:
         ok, reason = can_enter()
         if not ok:
             p_log(f"Entry blocked: {reason}")
@@ -527,10 +676,17 @@ def enter_trade(q, manual=False):
     }
     if alpaca_trading:
         try:
-            oid=str(alpaca_trading.submit_order(MarketOrderRequest(
-                symbol=q['symbol'],qty=shrs,side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY)).id)
-            trade['order_id']=oid
+            if is_premarket_window():
+                limit_px = round(ep * 1.003, 2)  # small buffer above last price to help fill
+                oid=str(alpaca_trading.submit_order(LimitOrderRequest(
+                    symbol=q['symbol'],qty=shrs,side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,limit_price=limit_px,extended_hours=True)).id)
+                trade['order_id']=oid; trade['premarket']=True
+            else:
+                oid=str(alpaca_trading.submit_order(MarketOrderRequest(
+                    symbol=q['symbol'],qty=shrs,side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY)).id)
+                trade['order_id']=oid
         except Exception as e:
             p_log(f"Alpaca order: {e}")
 
@@ -538,6 +694,7 @@ def enter_trade(q, manual=False):
     paper['status'] = 'entered'
     paper['capital'] = 0
     paper['better_opp'] = None
+    save_state()
     p_log(f"ENTERED {q['symbol']} {shrs}sh @ ${ep:.2f} target=${trade['target']:.2f}")
 
     reason_str = "manual entry" if manual else f"Score {q.get('_score',0)}/99"
@@ -567,6 +724,8 @@ def close_trade(sym, reason='target'):
     paper['completed'].append({**t,'exit':sell,'exit_time':now_et(),
                                 'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
     paper['total_pnl'] += pnl; paper['capital'] = proceeds
+    append_history({**t,'exit':sell,'exit_time':now_et(),'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
+    save_state()
     reason_label = {'target':'TARGET','stop':'STOP','momentum_stall':'MOMENTUM STALL',
                      'rotate_better':'ROTATING','news_exit':'NEWS EXIT','eod':'EOD',
                      'manual':'MANUAL'}.get(reason, reason.upper())
@@ -604,6 +763,27 @@ def _auto_pick_enter():
         _picking_now = True
     try:
         time.sleep(3)
+
+        # 0. PRE-MARKET window (watchlist only, limit orders, extra caution)
+        if is_premarket_window() and not is_market_open():
+            ok, reason = can_enter_premarket()
+            if not ok:
+                return
+            spy=cp('SPY'); qqq=cp('QQQ')
+            best_wl = next((q for q in score_watchlist(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0) if q['_qualifies']), None)
+            if best_wl:
+                last = _last_watchlist_notify.get(best_wl['symbol'], 0)
+                if time.time() - last > 60:
+                    tg(f"🌙 PRE-MARKET WATCHLIST OPPORTUNITY — {best_wl['symbol']}\n{'━'*22}\n"
+                       f"Score {best_wl['_score']}/99 | Vol {best_wl.get('_vr',0):.1f}x | "
+                       f"Chg {best_wl.get('regularMarketChangePercent',0):+.1f}%\n"
+                       f"Entering with a LIMIT order (extended hours) — pre-market liquidity "
+                       f"is thinner, so this may fill partially or not at all.\n{APP_URL}")
+                    _last_watchlist_notify[best_wl['symbol']] = time.time()
+                paper['picked'] = best_wl; paper['status'] = 'picked'
+                enter_trade(best_wl, bypass_hours=True)
+            return
+
         ok, reason = can_enter()
         if not ok:
             p_log(f"Auto-pick skipped: {reason}"); return
@@ -660,11 +840,46 @@ def _notify_pick(q):
     )
 
 # ── SCHEDULER ─────────────────────────────────────────────────────────
+def get_real_option_quote(symbol, underlying_price):
+    """Tries to fetch a real near-the-money, near-term call contract's live
+    quote from Alpaca. Returns None on ANY failure (no entitlement, no
+    contracts, API mismatch) so callers cleanly fall back to the simulated
+    estimate — this should never be able to crash the app."""
+    if not ALPACA_OPTIONS_AVAILABLE or not alpaca_options_data:
+        return None
+    try:
+        chain = alpaca_options_data.get_option_chain(OptionChainRequest(underlying_symbol=symbol))
+        if not chain:
+            return None
+        best, best_diff = None, None
+        for contract_sym, snap in chain.items():
+            if not contract_sym[-9:-8] == 'C':  # Alpaca OCC symbol: ...C/P + 8-digit strike
+                continue
+            try:
+                strike = float(contract_sym[-8:]) / 1000.0
+            except Exception:
+                continue
+            quote = getattr(snap, 'latest_quote', None)
+            if not quote: continue
+            bid = float(getattr(quote, 'bid_price', 0) or 0)
+            ask = float(getattr(quote, 'ask_price', 0) or 0)
+            if bid <= 0 or ask <= 0: continue
+            diff = abs(strike - underlying_price)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best = {'contract': contract_sym, 'strike': strike, 'bid': bid,
+                         'ask': ask, 'mid': round((bid+ask)/2, 2)}
+        return best
+    except Exception as e:
+        print(f"  Real option quote {symbol}: {e}")
+        return None
+
 def refresh_options_candidates():
-    """Keep up to OPTIONS_MAX_SLOTS simulated option positions filled from
-    the current scored candidate list, skipping whatever's already the active
-    equity trade or already tracked. This is an educational P&L estimate —
-    NOT real options data and NOT a real fill."""
+    """Keep up to OPTIONS_MAX_SLOTS option positions filled from the current
+    scored candidate list. Tries a REAL Alpaca option quote first; if that's
+    not available (no entitlement, or alpaca-py too old), falls back to the
+    educational leverage-estimate. Every Telegram/UI label says which mode
+    is actually active — never silently mislabeled."""
     if not is_market_open(): return
     active_syms = set(paper['active'].keys())
     tracked_syms = {c['symbol'] for c in options_tracker['candidates']}
@@ -678,44 +893,69 @@ def refresh_options_candidates():
         cached = cp(sym)
         price = cached['price'] if cached else c.get('regularMarketPrice', 0)
         if not price: continue
-        pos = {
-            'symbol': sym, 'entry_underlying': price, 'current_underlying': price,
-            'entry_time': now_et(), 'entered_at': time.time(),
-            'score': c.get('_score', 0), 'peak_pnl_pct': 0.0,
-        }
+
+        real = get_real_option_quote(sym, price)
+        if real:
+            pos = {'symbol': sym, 'is_real': True, 'contract': real['contract'],
+                    'strike': real['strike'], 'entry_premium': real['mid'],
+                    'current_premium': real['mid'], 'entry_underlying': price,
+                    'current_underlying': price, 'entry_time': now_et(),
+                    'entered_at': time.time(), 'score': c.get('_score', 0), 'peak_pnl_pct': 0.0}
+            options_tracker['candidates'].append(pos)
+            slots_open -= 1
+            p_log(f"OPTIONS (REAL) entered {sym} {real['contract']} @ ${real['mid']:.2f} premium")
+            tg(f"🎯 REAL Option Candidate — {sym}\n"
+               f"Contract: {real['contract']} (strike ${real['strike']:.2f})\n"
+               f"Premium: ${real['mid']:.2f} (bid ${real['bid']:.2f} / ask ${real['ask']:.2f})\n"
+               f"Real listed Alpaca option quote, tracked as paper — not a simulated estimate.")
+            continue
+
+        pos = {'symbol': sym, 'is_real': False, 'entry_underlying': price,
+                'current_underlying': price, 'entry_time': now_et(),
+                'entered_at': time.time(), 'score': c.get('_score', 0), 'peak_pnl_pct': 0.0}
         options_tracker['candidates'].append(pos)
         slots_open -= 1
         p_log(f"OPTIONS (sim) entered {sym} @ ${price:.2f} underlying")
         tg(f"🎯 Simulated Option Candidate — {sym}\n"
            f"Underlying entry: ${price:.2f} (score {c.get('_score',0)}/99)\n"
            f"Sim target: +{OPTIONS_TARGET_PCT*100:.0f}% · Sim stop: -{OPTIONS_STOP_PCT*100:.0f}%\n"
-           f"(Educational estimate — not a real options fill)")
+           f"(Real options data unavailable right now — using leverage estimate instead)")
 
 def monitor_options():
     if not options_tracker['candidates']: return
     for pos in list(options_tracker['candidates']):
-        sym = pos['symbol']; cached = cp(sym)
-        price = cached['price'] if cached else pos['current_underlying']
-        pos['current_underlying'] = price
-        underlying_pct = (price - pos['entry_underlying']) / pos['entry_underlying'] * 100
-        sim_option_pct = underlying_pct * OPTIONS_LEVERAGE
-        pos['peak_pnl_pct'] = max(pos.get('peak_pnl_pct', 0), sim_option_pct)
-        pos['sim_pnl_pct'] = sim_option_pct
+        sym = pos['symbol']
+        if pos.get('is_real'):
+            cached = cp(sym)
+            underlying_price = cached['price'] if cached else pos['current_underlying']
+            pos['current_underlying'] = underlying_price
+            real = get_real_option_quote(sym, underlying_price)
+            current_premium = real['mid'] if (real and real.get('contract')==pos.get('contract')) else pos.get('current_premium', pos['entry_premium'])
+            pos['current_premium'] = current_premium
+            pnl_pct = (current_premium - pos['entry_premium']) / pos['entry_premium'] * 100 if pos['entry_premium'] else 0
+        else:
+            cached = cp(sym)
+            price = cached['price'] if cached else pos['current_underlying']
+            pos['current_underlying'] = price
+            underlying_pct = (price - pos['entry_underlying']) / pos['entry_underlying'] * 100
+            pnl_pct = underlying_pct * OPTIONS_LEVERAGE
+
+        pos['peak_pnl_pct'] = max(pos.get('peak_pnl_pct', 0), pnl_pct)
+        pos['sim_pnl_pct'] = pnl_pct
         closed_reason = None
-        if sim_option_pct >= OPTIONS_TARGET_PCT*100: closed_reason = 'target'
-        elif sim_option_pct <= -OPTIONS_STOP_PCT*100: closed_reason = 'stop'
-        elif pos['peak_pnl_pct'] >= 15 and (pos['peak_pnl_pct']-sim_option_pct) >= 10: closed_reason = 'momentum_stall'
+        if pnl_pct >= OPTIONS_TARGET_PCT*100: closed_reason = 'target'
+        elif pnl_pct <= -OPTIONS_STOP_PCT*100: closed_reason = 'stop'
+        elif pos['peak_pnl_pct'] >= 15 and (pos['peak_pnl_pct']-pnl_pct) >= 10: closed_reason = 'momentum_stall'
         if closed_reason:
             options_tracker['candidates'].remove(pos)
-            options_tracker['completed'].insert(0, {**pos, 'exit_underlying': price,
-                'exit_time': now_et(), 'reason': closed_reason, 'sim_pnl_pct': sim_option_pct})
+            options_tracker['completed'].insert(0, {**pos, 'exit_time': now_et(),
+                'reason': closed_reason, 'sim_pnl_pct': pnl_pct})
             options_tracker['completed'] = options_tracker['completed'][:20]
             icon = '💰' if closed_reason=='target' else '🛑' if closed_reason=='stop' else '🔄'
-            tg(f"{icon} Simulated Option CLOSED — {sym} ({closed_reason.upper()})\n"
-               f"Underlying ${pos['entry_underlying']:.2f}→${price:.2f} ({underlying_pct:+.1f}%)\n"
-               f"Sim option P&L: {sim_option_pct:+.1f}% (5x leverage estimate)\n"
-               f"(Educational estimate — not a real options fill)")
-            p_log(f"OPTIONS (sim) closed {sym} {closed_reason} sim P&L {sim_option_pct:+.1f}%")
+            mode = "REAL option" if pos.get('is_real') else "Simulated option"
+            disclaimer = "(Real Alpaca options quote)" if pos.get('is_real') else "(Educational estimate — not a real options fill)"
+            tg(f"{icon} {mode} CLOSED — {sym} ({closed_reason.upper()})\nP&L: {pnl_pct:+.1f}%\n{disclaimer}")
+            p_log(f"OPTIONS ({'real' if pos.get('is_real') else 'sim'}) closed {sym} {closed_reason} P&L {pnl_pct:+.1f}%")
 
 def job_morning():
     if not is_trading_day(): return
@@ -739,9 +979,11 @@ def job_morning():
        f"This is NOT final — we re-scan with live data at 9:45 AM before risking any capital.")
 
 def job_enter_945():
-    """9:45 AM — opening volatility has settled. ALWAYS re-scan fresh here;
-    never blindly enter the stale 8AM pick (that was the root cause of
-    missing better setups like SOXL on big move days)."""
+    """9:45 AM — opening volatility has settled. Routes through the SAME
+    locked entry point as everything else (_auto_pick_enter), so it can
+    never race with job_monitor's per-minute checks and double-fire.
+    That race was the cause of the confusing duplicate 'PICKED — Capital
+    $0.00' message right after a watchlist entry already executed."""
     if not is_trading_day(): return
     if paper['active']: return  # Already in a trade
     spy=cp('SPY'); qqq=cp('QQQ')
@@ -750,12 +992,7 @@ def job_enter_945():
     if not mkt_ok:
         tg(f"🚫 9:45 AM — Market too weak (SPY {sp:+.2f}% QQQ {qp:+.2f}%). Protecting capital today."); return
     p_log("9:45 AM — running fresh scan (ignoring 8AM preview)")
-    q=pick_best(sp,qp)
-    if q:
-        paper['picked']=q; paper['status']='picked'
-        _notify_pick(q); time.sleep(5); enter_trade(q)
-    else:
-        tg("⚠️ 9:45 AM — No stock meets standards yet. Watching for a setup..."); paper['status']='waiting'
+    threading.Thread(target=_auto_pick_enter, daemon=True).start()
 
 # ── PER-SYMBOL NEWS CHECK (for active position emergency exit) ───────
 _symbol_news_cache = {}  # sym -> (ts, bool)
@@ -804,11 +1041,16 @@ def job_monitor():
         # if 9:45's scan came up empty, nothing ever tried again until you
         # manually clicked Force Pick.
         if paper['status'] in ('waiting', 'picked') and is_trading_day():
-            ok, reason = can_enter()
-            if ok:
-                threading.Thread(target=_auto_pick_enter, daemon=True).start()
-            elif 'Max trades' in reason or 'closed' in reason:
-                pass  # nothing to do, day is over or capped
+            if is_premarket_window():
+                ok, _ = can_enter_premarket()
+                if ok:
+                    threading.Thread(target=_auto_pick_enter, daemon=True).start()
+            else:
+                ok, reason = can_enter()
+                if ok:
+                    threading.Thread(target=_auto_pick_enter, daemon=True).start()
+                elif 'Max trades' in reason or 'closed' in reason:
+                    pass  # nothing to do, day is over or capped
         return
     if alpaca_trading:
         try:
@@ -1089,8 +1331,15 @@ def candles():
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.dropna().tail(60)
-        bars = [{'t':str(i),'o':round(float(r.Open),2),'h':round(float(r.High),2),
-                 'l':round(float(r.Low),2),'c':round(float(r.Close),2)} for i,r in df.iterrows()]
+        bars = []
+        for i, r in df.iterrows():
+            try:
+                idx_et = i.tz_convert(ET_TZ) if i.tzinfo else i.tz_localize('UTC').tz_convert(ET_TZ)
+                hm = idx_et.strftime('%H:%M')
+            except Exception:
+                hm = str(i)[11:16]
+            bars.append({'t':str(i),'hm':hm,'o':round(float(r.Open),2),'h':round(float(r.High),2),
+                         'l':round(float(r.Low),2),'c':round(float(r.Close),2)})
         return cors({'bars':bars,'symbol':sym})
     except Exception as e:
         return cors({'bars':[],'error':str(e)})
@@ -1101,6 +1350,21 @@ def options_status():
                  'completed':options_tracker['completed'][:10],
                  'max_slots':OPTIONS_MAX_SLOTS,
                  'leverage':OPTIONS_LEVERAGE})
+
+@app.route('/trade-markers')
+def trade_markers():
+    """Buy/sell markers for the live chart tab — today's entries/exits for a symbol."""
+    sym = request.args.get('symbol','').upper()
+    if not sym: return cors({'markers':[]})
+    markers = []
+    for t in paper['completed']:
+        if t['symbol'] != sym: continue
+        markers.append({'type':'buy','time':t['entry_time'],'price':t['entry']})
+        markers.append({'type':'sell','time':t['exit_time'],'price':t['exit'],'reason':t['reason']})
+    for t in paper['active'].values():
+        if t['symbol'] == sym:
+            markers.append({'type':'buy','time':t['entry_time'],'price':t['entry']})
+    return cors({'markers':markers})
 
 @app.route('/watchlist-prices')
 def watchlist_prices():
@@ -1184,7 +1448,7 @@ def watchlist():
     if request.method=='POST':
         data=request.get_json() or {}
         syms=[s.strip().upper() for s in data.get('symbols',[]) if s.strip()][:5]
-        custom_watchlist=syms; p_log(f"Watchlist: {syms}")
+        custom_watchlist=syms; p_log(f"Watchlist: {syms}"); save_state()
         return cors({'ok':True,'symbols':custom_watchlist})
     return cors({'symbols':custom_watchlist})
 
@@ -1223,16 +1487,44 @@ MAJOR_NEUTRAL  = ['fomc','fed meeting','cpi','jobs report','gdp',
 
 _alert_cache = {'alert':None,'ts':0}
 
+# ── WHALE ACTIVITY (heuristic) ─────────────────────────────────────────
+# Real institutional order-flow / dark-pool data requires a paid Level 2
+# or options-flow feed we don't have. This is a volume-surge proxy instead:
+# unusually high relative volume + a strong directional move is what large
+# buyers/sellers typically leave behind. Labeled as an estimate, not fact.
+def detect_whale_activity(q):
+    vr = q.get('_vr', 0); chg = q.get('regularMarketChangePercent', 0)
+    if vr >= 3 and chg >= 4:
+        return {'symbol':q['symbol'],'direction':'buying','strength':min(99,round(vr*8)),
+                'vol_ratio':vr,'change_pct':chg}
+    if vr >= 3 and chg <= -4:
+        return {'symbol':q['symbol'],'direction':'selling','strength':min(99,round(vr*8)),
+                'vol_ratio':vr,'change_pct':chg}
+    return None
+
+def scan_whale_activity():
+    pool = paper.get('candidates', [])[:15]
+    out = [w for w in (detect_whale_activity(q) for q in pool) if w]
+    out.sort(key=lambda x: x['strength'], reverse=True)
+    return out[:6]
+
 def scan_market_alerts():
     if time.time()-_alert_cache['ts']<120 and _alert_cache['ts']>0:
         return _alert_cache['alert']
     news=get_news()
+    whales = scan_whale_activity()
+    whale_note = ''
+    if whales:
+        buying = [w for w in whales if w['direction']=='buying']
+        selling = [w for w in whales if w['direction']=='selling']
+        if selling: whale_note = f" Heavy volume selling also detected in {selling[0]['symbol']}."
+        elif buying: whale_note = f" Note: heavy volume buying detected in {buying[0]['symbol']} — smart money may disagree."
     for n in news:
         title=n['title'].lower()
         for kw in MAJOR_NEGATIVE:
             if kw in title:
                 alert={'type':'danger','icon':'🚨','keyword':kw,
-                       'title':n['title'],'color':'red'}
+                       'title':n['title']+whale_note,'color':'red'}
                 _alert_cache.update({'alert':alert,'ts':time.time()})
                 return alert
         for kw in MAJOR_POSITIVE:
@@ -1249,6 +1541,10 @@ def scan_market_alerts():
                 return alert
     _alert_cache.update({'alert':None,'ts':time.time()})
     return None
+
+@app.route('/whale-activity')
+def whale_activity_route():
+    return cors({'whales': scan_whale_activity()})
 
 @app.route('/market-summary')
 def market_summary():
@@ -1277,17 +1573,51 @@ def market_alert():
     alert = scan_market_alerts()
     return cors({'alert': alert})
 
+@app.route('/performance')
+def performance():
+    """All-time stats from the permanent history file, not just today."""
+    try:
+        if not os.path.exists(HISTORY_FILE):
+            return cors({'trades':0,'win_rate':0,'total_pnl':0,'avg_win':0,'avg_loss':0,
+                         'best':None,'worst':None,'by_reason':{}})
+        with open(HISTORY_FILE) as f:
+            hist = json.load(f)
+        if not hist:
+            return cors({'trades':0,'win_rate':0,'total_pnl':0,'avg_win':0,'avg_loss':0,
+                         'best':None,'worst':None,'by_reason':{}})
+        wins = [h for h in hist if h.get('pnl',0) >= 0]
+        losses = [h for h in hist if h.get('pnl',0) < 0]
+        by_reason = {}
+        for h in hist:
+            r = h.get('reason','unknown')
+            by_reason[r] = by_reason.get(r, 0) + 1
+        best = max(hist, key=lambda h: h.get('pnl_pct',0))
+        worst = min(hist, key=lambda h: h.get('pnl_pct',0))
+        return cors({
+            'trades': len(hist),
+            'win_rate': round(len(wins)/len(hist)*100, 1),
+            'total_pnl': round(sum(h.get('pnl',0) for h in hist), 2),
+            'avg_win': round(sum(h.get('pnl',0) for h in wins)/len(wins), 2) if wins else 0,
+            'avg_loss': round(sum(h.get('pnl',0) for h in losses)/len(losses), 2) if losses else 0,
+            'best': {'symbol':best['symbol'],'pnl_pct':best.get('pnl_pct',0),'date':best.get('date','')},
+            'worst': {'symbol':worst['symbol'],'pnl_pct':worst.get('pnl_pct',0),'date':worst.get('date','')},
+            'by_reason': by_reason,
+        })
+    except Exception as e:
+        return cors({'error': str(e)})
+
 @app.route('/notify')
 def notify(): return cors({'ok':tg(request.args.get('msg','')) if request.args.get('msg') else False})
 
 # ── START ─────────────────────────────────────────────────────────────
+load_state()
 threading.Thread(target=price_thread,daemon=True).start()
 import atexit
 try:
     sched=BackgroundScheduler(timezone=ET_TZ)
     sched.add_job(job_morning,    'cron',day_of_week='mon-fri',hour=8, minute=0)
     sched.add_job(job_enter_945,  'cron',day_of_week='mon-fri',hour=9, minute=45)
-    sched.add_job(job_monitor,    'cron',day_of_week='mon-fri',hour='9-16',minute='*')
+    sched.add_job(job_monitor,    'cron',day_of_week='mon-fri',hour='8-16',minute='*')
     sched.add_job(job_eod,        'cron',day_of_week='mon-fri',hour=15,minute=55)
     sched.add_job(job_keepalive,  'interval',minutes=10)
     sched.start(); atexit.register(lambda:sched.shutdown(wait=False))
