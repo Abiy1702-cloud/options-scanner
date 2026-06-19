@@ -244,6 +244,21 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 /* ══ WATCHLIST TAB ═══════════════════════════════════════════ */
 .wl-page{padding:9px;height:100%;overflow-y:auto}
 .pro-page{padding:9px;height:100%;overflow-y:auto}
+/* Inline AI chat panel */
+.inline-chat-msgs{max-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:5px;margin-bottom:7px}
+.inline-chat-row{display:flex;gap:6px}
+.icm-user{align-self:flex-end;background:var(--bg3);border:1px solid var(--border);border-radius:7px 7px 2px 7px;padding:6px 9px;font-size:10px;color:var(--t1);max-width:85%}
+.icm-ai{align-self:flex-start;background:rgba(52,211,153,.06);border:1px solid rgba(52,211,153,.15);border-radius:7px 7px 7px 2px;padding:6px 9px;font-size:10px;color:var(--t1);max-width:90%}
+.icm-lbl{font-size:7px;color:var(--t3);margin-bottom:2px;font-family:var(--mono)}
+/* Multi-day toggle */
+.multi-day-row{display:flex;align-items:center;gap:8px;margin-top:6px;padding:6px 8px;background:var(--bg3);border-radius:7px;border:1px solid var(--border)}
+.mdr-label{font-size:9px;color:var(--t2);font-family:var(--mono);flex:1}
+.toggle-sw{position:relative;display:inline-block;width:32px;height:17px}
+.toggle-sw input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;cursor:pointer;inset:0;background:var(--bg3);border:1px solid var(--border);border-radius:17px;transition:.2s}
+.toggle-slider:before{position:absolute;content:"";height:11px;width:11px;left:2px;bottom:2px;background:var(--t3);border-radius:50%;transition:.2s}
+input:checked+.toggle-slider{background:rgba(52,211,153,.2);border-color:var(--green)}
+input:checked+.toggle-slider:before{transform:translateX(15px);background:var(--green)}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.7);animation:live-pulse 1.5s infinite}
 @keyframes live-pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.6)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
 .pro-chart-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
@@ -395,6 +410,22 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <!-- Completed trades -->
         <div id="hist-body"></div>
 
+        <!-- Inline AI chat (scoped to active/watched symbol) -->
+        <div class="card" id="inline-chat-card">
+          <div class="card-t">🤖 AI Chat <span class="cbadge" id="inline-chat-sym">—</span></div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">
+            <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="quickInlineChat('Should I hold or sell?')">Hold or sell?</button>
+            <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="quickInlineChat('What is the current signal and why?')">Current signal?</button>
+            <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="quickInlineChat('Any negative news on this stock?')">Any bad news?</button>
+            <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="quickInlineChat('What are the support and resistance levels?')">Support/resistance?</button>
+          </div>
+          <div class="inline-chat-msgs" id="inline-chat-msgs"></div>
+          <div class="inline-chat-row">
+            <input class="wl-inp" id="inline-chat-inp" placeholder="Ask about current trade, signals, news..." onkeydown="if(event.key==='Enter')sendInlineChat()" style="font-size:11px;padding:7px 10px">
+            <button class="wl-btn-add" onclick="sendInlineChat()" style="padding:7px 12px;font-size:10px">Ask</button>
+          </div>
+        </div>
+
         <!-- Whale activity heuristic -->
         <div class="card">
           <div class="card-t">🐋 Whale Activity <span class="cbadge" id="whale-badge">—</span></div>
@@ -491,6 +522,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         <div class="pro-actions">
           <button class="btn-sell" id="pro-buy-btn" onclick="proBuyNow()">🟢 Buy Now</button>
           <button class="wlt-del" id="pro-release-btn" onclick="releaseLock()" style="border:1px solid var(--border);border-radius:7px;padding:9px 14px">🔓 Stop following</button>
+        </div>
+        <div class="multi-day-row">
+          <span class="mdr-label">📅 Multi-day hold — skip intraday exits, hold for days/weeks</span>
+          <label class="toggle-sw"><input type="checkbox" id="multi-day-toggle"><span class="toggle-slider"></span></label>
         </div>
       </div>
 
@@ -777,11 +812,16 @@ async function refreshStatus(){
         document.getElementById('btn-exit-main').onclick=()=>closeTrade(t.symbol);
       }
       currentChartSymbol=t.symbol;
+      setInlineChatSymbol(t.symbol);
+      // Live price in the tab title when in a trade
+      document.title=`${t.symbol} $${cur.toFixed(2)} ${pos?'▲':'▼'} | AutoTrade Pro`;
       if(chartVisible)loadChart(t.symbol);
       return;
     }
     if(actRow)actRow.style.display='none';
     hideChart();
+    setInlineChatSymbol(null);
+    document.title='AutoTrade Pro';
 
     // PICK PENDING
     if(d.picked&&d.status==='picked'){
@@ -916,29 +956,56 @@ async function loadChart(sym){
     drawCandles(d.bars||[]);
   }catch(e){}
 }
-function drawCandles(bars){
-  const canvas=document.getElementById('candle-canvas');
-  if(!canvas)return;
-  const ctx=canvas.getContext('2d');
-  const w=canvas.clientWidth||300,h=110;
-  canvas.width=w;canvas.height=h;
+function drawCandleChart(canvas, bars, h=110){
+  if(!canvas) return;
+  const dpr = window.devicePixelRatio||1;
+  const w = canvas.clientWidth || canvas.offsetWidth || 400;
+  canvas.width  = w*dpr; canvas.height = h*dpr;
+  canvas.style.width = w+'px'; canvas.style.height = h+'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
   ctx.clearRect(0,0,w,h);
-  if(!bars.length){ctx.fillStyle='#475569';ctx.font='10px monospace';ctx.fillText('No chart data available',10,h/2);return;}
-  const highs=bars.map(b=>b.h),lows=bars.map(b=>b.l);
-  const max=Math.max(...highs),min=Math.min(...lows),range=(max-min)||1;
-  const cw=w/bars.length;
+  if(!bars.length){
+    ctx.fillStyle='#475569'; ctx.font='10px monospace';
+    ctx.fillText('No chart data yet',10,h/2); return;
+  }
+  const padL=2, padR=46, padT=8, padB=18;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const allH=bars.map(b=>b.h), allL=bars.map(b=>b.l);
+  const hi=Math.max(...allH), lo=Math.min(...allL), rng=(hi-lo)||1;
+  const cw = pw / bars.length;
+  const fy = v => padT + ph - ((v-lo)/rng*ph);
+  // Grid
+  ctx.strokeStyle='rgba(255,255,255,.05)'; ctx.lineWidth=0.5;
+  for(let i=0;i<=3;i++){
+    const v=lo+rng*i/3, y=fy(v);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.fillStyle='#64748b'; ctx.font='8px monospace';
+    ctx.fillText('$'+v.toFixed(2), w-padR+3, y+3);
+  }
+  // Time labels
+  const step = Math.max(1,Math.floor(bars.length/4));
+  bars.forEach((b,i)=>{ if(i%step===0 && b.hm){ ctx.fillStyle='#475569'; ctx.font='7px monospace'; ctx.fillText(b.hm, padL+i*cw, h-4); }});
+  // Candles — continuous series, each one connected to the next
   bars.forEach((b,i)=>{
-    const x=i*cw+cw/2;
-    const yO=h-((b.o-min)/range*h),yC=h-((b.c-min)/range*h),yH=h-((b.h-min)/range*h),yL=h-((b.l-min)/range*h);
-    const up=b.c>=b.o;
-    ctx.strokeStyle=up?'#34d399':'#f87171';ctx.fillStyle=up?'#34d399':'#f87171';
-    ctx.lineWidth=1;
-    ctx.beginPath();ctx.moveTo(x,yH);ctx.lineTo(x,yL);ctx.stroke();
-    const bw=Math.max(cw*0.6,1);
-    ctx.fillRect(x-bw/2,Math.min(yO,yC),bw,Math.max(Math.abs(yC-yO),1));
+    const x = padL + i*cw + cw/2;
+    const yO=fy(b.o), yC=fy(b.c), yH=fy(b.h), yL=fy(b.l);
+    const up = b.c >= b.o;
+    const col = up ? '#34d399' : '#f87171';
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,yH); ctx.lineTo(x,yL); ctx.stroke();
+    const bw = Math.max(Math.floor(cw*0.75), 1);
+    const bodyH = Math.max(Math.abs(yC-yO), 1);
+    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, bodyH);
   });
+  // Dashed current-price line
+  const last = bars[bars.length-1].c, y=fy(last);
+  ctx.strokeStyle='rgba(255,255,255,.25)'; ctx.setLineDash([3,4]); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+  ctx.setLineDash([]);
 }
-setInterval(()=>{if(chartVisible&&currentChartSymbol)loadChart(currentChartSymbol);},15000);
+function drawCandles(bars){ drawCandleChart(document.getElementById('candle-canvas'), bars, 110); }
+setInterval(()=>{if(chartVisible&&currentChartSymbol)loadChart(currentChartSymbol);},8000);
 
 // ── ABIY PRO LIVE TAB ────────────────────────────────────────────────
 let proSymbol=null, proLocked=null;
@@ -955,9 +1022,12 @@ async function watchSymbol(){
 }
 async function proBuyNow(){
   if(!proSymbol)return;
+  const multiDay = document.getElementById('multi-day-toggle')?.checked || false;
   try{
-    const d=await(await authFetch('/pro-buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:proSymbol})})).json();
-    toast(d.ok?'✅ Bought '+proSymbol+' — bot takes over from here':'❌ '+d.msg);
+    const d=await(await authFetch('/pro-buy',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({symbol:proSymbol,multi_day:multiDay})})).json();
+    const note = multiDay ? ' (multi-day hold — intraday exits disabled)' : '';
+    toast(d.ok?'✅ Bought '+proSymbol+note:'❌ '+d.msg);
     setTimeout(refreshProLive,1500);
   }catch(e){toast('❌ Failed');}
 }
@@ -1026,80 +1096,50 @@ async function refreshProLive(){
 function drawProChart(bars, markers, sig){
   const canvas=document.getElementById('pro-canvas');
   if(!canvas) return;
-  const w=canvas.clientWidth||600, h=280;
+  const h=280;
+  drawCandleChart(canvas, bars, h);
+  if(!bars.length) return;
+
+  // Re-draw overlays on the same canvas (after drawCandleChart set up dimensions)
   const dpr=window.devicePixelRatio||1;
-  canvas.width=w*dpr; canvas.height=h*dpr;
-  canvas.style.width=w+'px'; canvas.style.height=h+'px';
+  const w=canvas.clientWidth||600;
   const ctx=canvas.getContext('2d');
-  ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,w,h);
-  if(!bars.length){ctx.fillStyle='#475569';ctx.font='11px monospace';ctx.fillText('No chart data yet — markets may be closed',12,h/2);return;}
+  // Don't re-scale — drawCandleChart already scaled and drew everything
+  // Calculate same coordinate system
+  const padL=2, padR=46, padT=8, padB=18;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const allH=bars.map(b=>b.h), allL=bars.map(b=>b.l);
+  if(sig){ allH.push(sig.vwap||0, sig.ema9||0, sig.ema20||0); allL.push(sig.vwap||999, sig.ema9||999, sig.ema20||999); }
+  const hi=Math.max(...allH), lo=Math.min(...allL.filter(v=>v>0)), rng=(hi-lo)||1;
+  const cw=pw/bars.length;
+  const fy = v => (padT + ph - ((v-lo)/rng*ph)) * dpr;
+  const fx = i => (padL + i*cw + cw/2) * dpr;
 
-  const padL=4, padR=52, padT=10, padB=22;
-  const plotW=w-padL-padR, plotH=h-padT-padB;
-  const allVals=bars.map(b=>b.h).concat(bars.map(b=>b.l));
-  if(sig){ allVals.push(sig.vwap, sig.ema9, sig.ema20); }
-  const max=Math.max(...allVals), min=Math.min(...allVals), range=(max-min)||1;
-  const cw=plotW/bars.length;
-  const yOf = v => padT + plotH - ((v-min)/range*plotH);
-
-  // Gridlines + price axis labels (4 levels)
-  ctx.strokeStyle='rgba(255,255,255,.06)'; ctx.fillStyle='#64748b'; ctx.font='9px monospace'; ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){
-    const v=min+range*i/4, y=yOf(v);
-    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
-    ctx.fillText('$'+v.toFixed(2), w-padR+4, y+3);
-  }
-  // Time axis labels (a few ticks)
-  const tickEvery=Math.max(1,Math.floor(bars.length/5));
-  bars.forEach((b,i)=>{
-    if(i%tickEvery===0 && b.hm){
-      ctx.fillText(b.hm, padL+i*cw+2, h-6);
-    }
-  });
-
-  // Candles
-  bars.forEach((b,i)=>{
-    const x=padL+i*cw+cw/2;
-    const yO=yOf(b.o), yC=yOf(b.c), yH=yOf(b.h), yL=yOf(b.l);
-    const up=b.c>=b.o;
-    ctx.strokeStyle=up?'#34d399':'#f87171'; ctx.fillStyle=up?'#34d399':'#f87171';
-    ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(x,yH); ctx.lineTo(x,yL); ctx.stroke();
-    const bw=Math.max(cw*0.7,1);
-    ctx.fillRect(x-bw/2, Math.min(yO,yC), bw, Math.max(Math.abs(yC-yO),1));
-  });
-
-  // VWAP + EMA overlays
+  // VWAP + EMA lines
   if(sig && sig.vwap_series && sig.vwap_series.length===bars.length){
-    const drawLine=(series,color)=>{
-      ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.beginPath();
-      series.forEach((v,i)=>{ const x=padL+i*cw+cw/2, y=yOf(v); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
-      ctx.stroke();
+    const drawLine=(series,color,dash=[])=>{
+      ctx.strokeStyle=color; ctx.lineWidth=1.5*dpr; ctx.setLineDash(dash);
+      ctx.beginPath();
+      series.forEach((v,i)=>{ const x=fx(i), y=fy(v); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+      ctx.stroke(); ctx.setLineDash([]);
     };
     drawLine(sig.vwap_series, '#f59e0b');
     drawLine(sig.ema9_series, '#60a5fa');
     drawLine(sig.ema20_series, '#c084fc');
   }
 
-  // Current price dashed line
-  if(bars.length){
-    const lastClose=bars[bars.length-1].c, y=yOf(lastClose);
-    ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke(); ctx.setLineDash([]);
-  }
-
   // BUY/SELL markers
   markers.forEach(m=>{
     const hm=(m.time||'').split(' ')[0];
     let idx=bars.findIndex(b=>b.hm===hm);
-    if(idx<0) idx = m.type==='buy' ? 0 : bars.length-1;
-    const x=padL+idx*cw+cw/2, y=yOf(m.price);
-    const col = m.type==='buy' ? '#34d399' : '#f87171';
+    if(idx<0) idx = m.type==='buy'?0:bars.length-1;
+    const x=fx(idx), y=fy(m.price);
+    const col = m.type==='buy'?'#34d399':'#f87171';
     ctx.fillStyle=col;
-    ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
-    ctx.font='9px monospace'; ctx.fillStyle=col;
-    ctx.fillText(m.type==='buy'?'BUY':'SELL', Math.max(2,x-12), m.type==='buy' ? Math.min(h-padB-2,y+16) : Math.max(padT+10,y-8));
+    ctx.beginPath(); ctx.arc(x,y,4*dpr,0,Math.PI*2); ctx.fill();
+    ctx.font=(9*dpr)+'px monospace'; ctx.fillStyle=col;
+    const lbl = m.type==='buy'?'BUY':'SELL';
+    ctx.fillText(lbl, Math.max(2, x-12*dpr), m.type==='buy'?Math.min(h*dpr-padB*dpr-2,y+14*dpr):Math.max(padT*dpr+10,y-8*dpr));
   });
 }
 setInterval(()=>{if(document.getElementById('tab-prolive').classList.contains('active'))refreshProLive();},4000);
@@ -1273,6 +1313,53 @@ function addMsg(role,text,cmd,exec){
   msgs.scrollTop=msgs.scrollHeight;
 }
 function sendS(btn){document.getElementById('chat-inp').value=btn.textContent;sendChat();}
+
+// ── INLINE AI CHAT (context-aware, scoped to active/watched symbol) ────
+let inlineChatSym = null;
+function setInlineChatSymbol(sym){
+  inlineChatSym=sym;
+  const badge=document.getElementById('inline-chat-sym');
+  if(badge) badge.textContent=sym||'—';
+}
+function addInlineMsg(role,text){
+  const msgs=document.getElementById('inline-chat-msgs');
+  if(!msgs)return;
+  const div=document.createElement('div');
+  div.className=role==='user'?'icm-user':'icm-ai';
+  if(role==='ai') div.innerHTML=`<div class="icm-lbl">🤖 AutoTrade AI</div>${text}`;
+  else div.textContent=text;
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+}
+async function sendInlineChat(){
+  const inp=document.getElementById('inline-chat-inp');
+  const msg=inp.value.trim();if(!msg)return;
+  inp.value='';addInlineMsg('user',msg);
+  const msgs=document.getElementById('inline-chat-msgs');
+  const tid='tic'+Date.now();
+  const dot=document.createElement('div');
+  dot.id=tid; dot.className='icm-ai';
+  dot.innerHTML=`<div class="icm-lbl">🤖 AutoTrade AI</div><div class="typing-dots"><span></span><span></span><span></span></div>`;
+  msgs.appendChild(dot); msgs.scrollTop=msgs.scrollHeight;
+  try{
+    const body={message:msg};
+    if(inlineChatSym) body.symbol=inlineChatSym;
+    const d=await(await authFetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)})).json();
+    document.getElementById(tid)?.remove();
+    addInlineMsg('ai', d.response||'—');
+    if(d.executed) setTimeout(refreshStatus,1500);
+  }catch(e){document.getElementById(tid)?.remove();addInlineMsg('ai','AI unavailable — check ANTHROPIC_API_KEY on Render.');}
+}
+// Keep inline chat symbol in sync with whatever is active or watched
+setInterval(()=>{
+  if(!inlineChatSym && proSymbol) setInlineChatSymbol(proSymbol);
+},3000);
+
+function quickInlineChat(msg){
+  document.getElementById('inline-chat-inp').value=msg;
+  sendInlineChat();
+}
 </script>
 </body>
 </html>

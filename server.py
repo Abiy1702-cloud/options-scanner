@@ -395,7 +395,49 @@ def score_day_trade(q, spy_pct=0, qqq_pct=0):
 
     return min(99, max(0, round(score)))
 
-def fetch_intraday_bars(symbol):
+def compute_atr_levels(symbol, entry_price):
+    """Compute ATR-based stop and target.
+    ATR (Average True Range) measures how much a stock actually moves per bar
+    on average — a $75 stock with ATR of $1.50 needs a wider stop than a $200
+    stock with ATR of $1.50. Using 1.5x ATR for the stop prevents the common
+    problem of getting shaken out on normal volatility noise.
+
+    Also finds the nearest recent support (for stop) and resistance (for target)
+    from the last 20 bars of 5-min data, which gives better levels than a flat %.
+    """
+    try:
+        df = fetch_intraday_bars(symbol)
+        if df.empty or len(df) < 10:
+            raise ValueError("not enough bars")
+        high = df['High'].values
+        low  = df['Low'].values
+        close = df['Close'].values
+        # True Range and ATR (14-period)
+        tr = [max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+              for i in range(1,len(close))]
+        atr = sum(tr[-14:]) / min(14, len(tr))
+        # Support = lowest low of last 20 bars; Resistance = highest high
+        support    = float(min(low[-20:]))
+        resistance = float(max(high[-20:]))
+        # Stop: entry - 1.5x ATR, but not below recent support
+        stop_atr  = entry_price - 1.5 * atr
+        stop      = round(max(stop_atr, support * 0.995), 2)
+        # Target: entry + 2x ATR minimum, aim for resistance if it's higher
+        target_atr = entry_price + 2.0 * atr
+        target = round(max(target_atr, resistance), 2)
+        # Sanity bounds — stop never more than 8% below entry, target never more than 20% above
+        stop   = max(stop,   round(entry_price * 0.92, 2))
+        target = min(target, round(entry_price * 1.20, 2))
+        stop_pct   = (entry_price - stop)   / entry_price
+        target_pct = (target - entry_price) / entry_price
+        return {'stop':stop,'target':target,'atr':round(atr,3),
+                'stop_pct':round(stop_pct*100,1),'target_pct':round(target_pct*100,1),
+                'support':round(support,2),'resistance':round(resistance,2)}
+    except Exception:
+        # Fallback to sensible defaults — wider than the old 4%/8% to avoid noise exits
+        return {'stop':round(entry_price*0.94,2),'target':round(entry_price*1.10,2),
+                'atr':None,'stop_pct':6.0,'target_pct':10.0,
+                'support':round(entry_price*0.94,2),'resistance':round(entry_price*1.10,2)}
     """5-min bars for today's session, used by both the chart and the signal."""
     try:
         df = yf.download(symbol, period='1d', interval='5m', auto_adjust=True, progress=False)
@@ -729,13 +771,17 @@ def enter_trade(q, manual=False, bypass_hours=False):
     if shrs < 1:
         p_log(f"Not enough capital for {q['symbol']} @ ${ep}"); return False
 
-    tp    = RULES['TARGET_PCT']
-    stop  = RULES['STOP_PCT']
+    # Compute ATR-based stop/target for this specific stock's volatility
+    levels = compute_atr_levels(q['symbol'], ep)
+    tp    = levels['target_pct'] / 100
+    stop  = levels['stop_pct']   / 100
     trade = {
         'symbol':q['symbol'],'name':q.get('shortName',q['symbol']),
         'trade_num':tnum,'shares':shrs,'entry':round(ep,2),
-        'cost':round(shrs*ep,2),'target':round(ep*(1+tp),2),
-        'stop':round(ep*(1-stop),2),'target_pct':tp,
+        'cost':round(shrs*ep,2),
+        'target':levels['target'],'stop':levels['stop'],
+        'target_pct':tp,'atr':levels.get('atr'),
+        'support':levels.get('support'),'resistance':levels.get('resistance'),
         'entry_time':now_et(),'current':round(ep,2),'peak':round(ep,2),
         'peak_pnl_pct':0.0,'entered_at':time.time(),
         'score':q.get('_score',0),'manual':manual,
@@ -808,7 +854,8 @@ def close_trade(sym, reason='target'):
     )
     nxt = paper['trade_seq']+1
     locked = paper.get('pro_locked_symbol')
-    can_rotate, _ = (True, "OK") if locked else can_enter()
+    multi_day_closed = t.get('multi_day', False)
+    can_rotate, _ = can_enter() if not locked else (True, "OK")
     if nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open() and can_rotate:
         paper['trade_seq']=nxt; paper['status']='waiting'
         if locked:
@@ -817,11 +864,10 @@ def close_trade(sym, reason='target'):
             tg(f"🔍 Trade {nxt}/{RULES['MAX_TRADES_PER_DAY']} — scanning for next setup...")
         threading.Thread(target=_auto_pick_enter, daemon=True).start()
     elif nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open():
-        paper['status']='waiting'  # market open but past cutoff time — will retry via job_monitor
+        paper['status']='waiting'
     else:
         paper['status']='done'
-        if nxt>RULES['MAX_TRADES_PER_DAY']:
-            tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{get_app_url()}")
+        tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{get_app_url()}")
 
 _pick_lock = threading.Lock()
 _picking_now = False
@@ -914,19 +960,21 @@ def _auto_pick_enter():
         _picking_now = False
 
 def _notify_pick(q):
-    tnum=paper['trade_seq']; tp=RULES['TARGET_PCT']*100
+    tnum=paper['trade_seq']
     cached=cp(q['symbol']); price=cached['price'] if cached else q['regularMarketPrice']
     shrs=int(paper['capital']/price) if price else 0
+    lvl=compute_atr_levels(q['symbol'], price)
     top3=paper.get('candidates',[])[:3]
     alts='\n'.join(f"  #{i+1} {c['symbol']} score={c['_score']}/99 chg={c.get('regularMarketChangePercent',0):+.1f}% vol={c.get('_vr',0):.1f}x" for i,c in enumerate(top3))
+    atr_note=f" (ATR ${lvl['atr']:.2f})" if lvl.get('atr') else ""
     tg(
         f"🔍 Trade {tnum}/{RULES['MAX_TRADES_PER_DAY']} PICKED — {q['symbol']}\n{'━'*22}\n"
         f"Price:  ${price:.2f} | Pre-mkt {q.get('preMarketChangePercent',0):+.1f}%\n"
         f"Score:  {q.get('_score',0)}/99 | Vol {q.get('_vr',0):.1f}x\n"
         f"Range:  ${q.get('fiftyTwoWeekLow',0):.0f} - ${q.get('fiftyTwoWeekHigh',0):.0f}\n{'━'*22}\n"
         f"Capital ${paper['capital']:,.2f} | ~{shrs}sh\n"
-        f"Target ${price*(1+RULES['TARGET_PCT']):.2f} (+{tp:.0f}%)\n"
-        f"Stop   ${price*(1-RULES['STOP_PCT']):.2f} (-4%)\n{'━'*22}\n"
+        f"Target ${lvl['target']:.2f} (+{lvl['target_pct']:.1f}%){atr_note}\n"
+        f"Stop   ${lvl['stop']:.2f} (-{lvl['stop_pct']:.1f}%) | Support ${lvl['support']:.2f}\n{'━'*22}\n"
         f"Top candidates:\n{alts}\n"
         f"Reply 'enter' or use dashboard to confirm\n{get_app_url()}"
     )
@@ -1172,32 +1220,42 @@ def job_monitor():
         peak_pct = (peak - t['entry']) / t['entry'] * 100
         paper['active'][sym]['peak_pnl_pct'] = max(peak_pct, t.get('peak_pnl_pct', 0))
 
-        # 1. Bad news on THIS symbol, or a market-wide danger alert — exit now.
-        # Per-symbol news gets a 3-min grace period after entry so a stale
-        # headline already sitting in the RSS feed can't cause an instant
-        # flip-flop exit right after buying (this is what happened with FCEL).
+        # 1. News exit — heavily tightened after the DRAM/QQQ losses (Jun 18).
+        # The root cause: "Fed decision" triggered market_danger with zero grace
+        # period, killing every trade within 60 seconds. New rules:
+        #   a) Never exit in the first 10 min (news existed before we entered)
+        #   b) Market-wide alerts only auto-exit on TRUE catastrophe (exchange
+        #      halt, nuclear, flash crash). Fed meetings, rate decisions, bank
+        #      news etc → show the banner, but DON'T force-close positions.
+        #   c) Per-symbol news needs 5-min grace AND price must be -0.5%+
+        #      below entry to confirm the headline is actually hurting the stock.
         held_sec = time.time() - t.get('entered_at', time.time())
-        symbol_news_hit = held_sec > 180 and check_symbol_news(sym)
-        if market_danger or symbol_news_hit:
-            label = mkt_alert['title'] if market_danger else f"Negative headline detected for {sym}"
-            paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 News exit: {label}", 'ts': now_et()}
-            p_log(f"NEWS EXIT triggered for {sym}: {label}")
-            close_trade(sym, 'news_exit')
-            continue
+        if held_sec > 600:  # 10-minute minimum hold before any news exit
+            true_catastrophe = mkt_alert and mkt_alert.get('catastrophe') and mkt_alert.get('type')=='danger'
+            price_confirms_damage = price < t['entry'] * 0.995
+            symbol_news_hit = held_sec > 300 and check_symbol_news(sym) and price_confirms_damage
+            if true_catastrophe or symbol_news_hit:
+                label = mkt_alert['title'] if true_catastrophe else f"Negative headline + price decline on {sym}"
+                paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 News exit: {label}", 'ts': now_et()}
+                p_log(f"NEWS EXIT {sym}: {label} (held {held_sec:.0f}s, price ${price:.2f} vs entry ${t['entry']:.2f})")
+                close_trade(sym, 'news_exit')
+                continue
 
-        # 2. Hit profit ceiling
-        if price >= t['target']:
+        multi_day = t.get('multi_day', False)
+
+        # 2. Hit profit ceiling (skip for multi-day holds — they use the stop only)
+        if not multi_day and price >= t['target']:
             close_trade(sym,'target'); continue
-        # 3. Hit hard stop
+        # 3. Hit hard stop (always applies, even multi-day)
         if price <= t['stop']:
             close_trade(sym,'stop'); continue
-        # 4. Trailing stop: once up TRAIL_TRIGGER_PCT+, exit if it gives back TRAIL_GIVEBACK_PCT from the peak
-        if peak_pct >= RULES['TRAIL_TRIGGER_PCT']*100 and (peak_pct - pnl_pct) >= RULES['TRAIL_GIVEBACK_PCT']*100:
-            p_log(f"{sym} momentum stalling — peak +{peak_pct:.1f}%, now +{pnl_pct:.1f}%. Locking in profit and rotating.")
+        # 4. Trailing stop — skip for multi-day (designed to hold through pullbacks)
+        if not multi_day and peak_pct >= RULES['TRAIL_TRIGGER_PCT']*100 and (peak_pct - pnl_pct) >= RULES['TRAIL_GIVEBACK_PCT']*100:
+            p_log(f"{sym} momentum stalling — peak +{peak_pct:.1f}%, now +{pnl_pct:.1f}%. Locking in profit.")
             close_trade(sym,'momentum_stall'); continue
-        # 5. Rotation: held a while with little gain AND a much better candidate exists
+        # 5. Rotation: held a while with little gain AND a much better candidate exists (intraday only)
         held_min = (time.time() - t.get('entered_at', time.time())) / 60
-        if check_rotation and held_min >= RULES['UNDERPERFORM_MINUTES'] and pnl_pct < RULES['UNDERPERFORM_MIN_PCT']:
+        if not multi_day and check_rotation and held_min >= RULES['UNDERPERFORM_MINUTES'] and pnl_pct < RULES['UNDERPERFORM_MIN_PCT']:
             spy=cp('SPY'); qqq=cp('QQQ')
             better = pick_best(spy['pct'] if spy else 0, qqq['pct'] if qqq else 0, exclude=[sym])
             if better and better.get('_score',0) - t.get('score',0) >= RULES['UNDERPERFORM_SCORE_GAP']:
@@ -1282,7 +1340,7 @@ def get_brief():
 
 # AI Chat
 chat_history=[]
-def ai_chat(user_msg):
+def ai_chat(user_msg, symbol=None):
     active=list(paper['active'].values())
     ctx_parts=[
         f"Trading state: {paper['status']}, Trade {paper['trade_seq']}/{RULES['MAX_TRADES_PER_DAY']}, P&L ${paper['total_pnl']:+.2f}",
@@ -1297,6 +1355,21 @@ def ai_chat(user_msg):
     mkt=all_prices()
     ctx_parts.append(f"Market: SPY {mkt.get('SPY',{}).get('pct',0):+.2f}% QQQ {mkt.get('QQQ',{}).get('pct',0):+.2f}%")
     ctx_parts.append(f"Top candidates: {', '.join(c['symbol']+'('+str(c.get('_score',0))+')' for c in paper.get('candidates',[])[:5])}")
+
+    # If a specific symbol is in context, add live data for it
+    if symbol:
+        try:
+            cached_sym = cp(symbol)
+            price = cached_sym['price'] if cached_sym else 0
+            sig_sym = compute_intraday_signal(symbol)
+            lvl = compute_atr_levels(symbol, price) if price else {}
+            ctx_parts.append(f"Symbol in focus: {symbol} @ ${price:.2f}")
+            if sig_sym:
+                ctx_parts.append(f"VWAP/EMA signal: {sig_sym['signal']} — {sig_sym['reason']}")
+            if lvl:
+                ctx_parts.append(f"ATR levels: stop ${lvl.get('stop',0):.2f}, target ${lvl.get('target',0):.2f}, support ${lvl.get('support',0):.2f}, resistance ${lvl.get('resistance',0):.2f}")
+        except Exception:
+            pass
 
     sys_prompt = (
         "You are AutoTrade Pro AI for Abiy Kassa. You are a professional day trader assistant.\n"
@@ -1481,26 +1554,24 @@ def pro_signal():
 
 @app.route('/pro-buy', methods=['POST'])
 def pro_buy():
-    """Manual first entry for PRO Live — strictly market-hours only, no
-    exceptions, since this is a deliberate hands-on decision, not an
-    auto-scan pick."""
+    """Manual first entry for PRO Live — strictly market-hours only."""
     if not is_market_open():
         return cors({'ok':False,'msg':'Market is closed — entries only work 9:30 AM-4:00 PM ET'})
     data = request.get_json() or {}
     sym = data.get('symbol','').upper()
+    multi_day = data.get('multi_day', False)  # #5: allow multi-day holds
     if not sym: return cors({'ok':False,'msg':'No symbol given'})
     if paper['active']:
         return cors({'ok':False,'msg':f"Already in a trade ({list(paper['active'].keys())[0]})"})
-    cached = cp(sym)
-    if not cached: return cors({'ok':False,'msg':f'No price data for {sym}'})
-    q = {'symbol':sym,'shortName':sym,'regularMarketPrice':cached['price'],
-         '_vr':2,'regularMarketChangePercent':cached['pct'],'marketCap':5e9,
-         'fiftyTwoWeekHigh':0,'fiftyTwoWeekLow':0,'preMarketChangePercent':0,'_score':0}
+    q = fetch_symbol_on_demand(sym)
+    if not q: return cors({'ok':False,'msg':f'Could not get market data for {sym} — check the ticker'})
     ok = enter_trade(q, manual=True)
     if ok:
         paper['pro_locked_symbol'] = sym
+        if multi_day:
+            paper['active'][sym]['multi_day'] = True
         save_state()
-        p_log(f"PRO Live: manual buy {sym} — bot will auto re-buy this symbol after exits from now on")
+        p_log(f"PRO Live: manual buy {sym} {'(multi-day hold)' if multi_day else ''}")
     return cors({'ok':ok,'msg':f"Entered {sym}" if ok else "Entry failed"})
 
 @app.route('/pro-release', methods=['POST'])
@@ -1543,6 +1614,35 @@ def watchlist_status():
         })
     return cors({'stocks': out, 'min_score': WATCHLIST_MIN_SCORE})
 
+def fetch_symbol_on_demand(sym):
+    """Fetch live data for any symbol, even if not in the scanned universe.
+    This fixes the 'no market data' error when manually entering SOXL, QQQ, etc."""
+    cached = cp(sym)
+    if cached:
+        return {'symbol':sym,'shortName':sym,'regularMarketPrice':cached['price'],
+                '_vr':1,'regularMarketChangePercent':cached['pct'],'marketCap':5e9,
+                'fiftyTwoWeekHigh':0,'fiftyTwoWeekLow':0,'preMarketChangePercent':0,'_score':0}
+    # Not in cache — fetch directly from yfinance
+    try:
+        tk = yf.Ticker(sym)
+        info = tk.fast_info
+        price = float(getattr(info,'last_price',0) or getattr(info,'regularMarketPrice',0) or 0)
+        if price <= 0:
+            hist = tk.history(period='1d',interval='1m')
+            if not hist.empty: price = float(hist['Close'].iloc[-1])
+        if price <= 0: return None
+        chg = float(getattr(info,'regularMarketChangePercent',0) or 0)
+        q = {'symbol':sym,'shortName':sym,'regularMarketPrice':price,
+             '_vr':1,'regularMarketChangePercent':chg,'marketCap':5e9,
+             'fiftyTwoWeekHigh':float(getattr(info,'year_high',0) or 0),
+             'fiftyTwoWeekLow':float(getattr(info,'year_low',0) or 0),
+             'preMarketChangePercent':0,'_score':0}
+        # Inject into the price cache so monitoring works normally
+        _price_cache[sym] = {'price':price,'pct':chg,'source':'yf-live','ts':time.time()}
+        return q
+    except Exception as e:
+        p_log(f"fetch_symbol_on_demand {sym}: {e}"); return None
+
 @app.route('/enter-now',methods=['POST'])
 def enter_now():
     if not is_market_open():
@@ -1550,14 +1650,11 @@ def enter_now():
     data=request.get_json() or {}
     sym=data.get('symbol','').upper()
     q=next((c for c in paper.get('candidates',[]) if c['symbol']==sym),None)
-    if not q and paper.get('picked') and paper['picked']['symbol']==sym:
+    if not q and paper.get('picked') and paper['picked'] and paper['picked'].get('symbol')==sym:
         q=paper['picked']
     if not q:
-        cached=cp(sym)
-        if not cached: return cors({'ok':False,'msg':f'No data for {sym}'})
-        q={'symbol':sym,'shortName':sym,'regularMarketPrice':cached['price'],
-           '_vr':2,'regularMarketChangePercent':cached['pct'],'marketCap':5e9,
-           'fiftyTwoWeekHigh':0,'fiftyTwoWeekLow':0,'preMarketChangePercent':0,'_score':70}
+        q = fetch_symbol_on_demand(sym)
+        if not q: return cors({'ok':False,'msg':f'Could not get market data for {sym} — check the ticker symbol'})
     ok=enter_trade(q,manual=True)
     return cors({'ok':ok,'msg':f"Entered {sym}" if ok else "Entry failed"})
 
@@ -1603,14 +1700,15 @@ def watchlist():
 def chat():
     data=request.get_json() or {}
     msg=data.get('message','').strip()
+    symbol=data.get('symbol','').upper()  # optional: scope chat to a specific symbol
     if not msg: return cors({'ok':False})
-    response,cmd=ai_chat(msg)
+    response,cmd=ai_chat(msg, symbol=symbol)
     result={'ok':True,'response':response,'command':cmd}
     if cmd:
         confirm=['confirm','yes','do it','go ahead','execute']
         if any(w in msg.lower() for w in confirm) or cmd.get('action')=='enter_now':
             result['executed']=execute_cmd(cmd)
-    chat_history.append({'user':msg,'ai':response,'time':now_et()})
+    chat_history.append({'user':msg,'ai':response,'time':now_et(),'symbol':symbol})
     if len(chat_history)>50: chat_history.pop(0)
     return cors(result)
 
@@ -1620,17 +1718,70 @@ def chat_history_route(): return cors({'history':chat_history[-20:]})
 @app.route('/news')
 def news_route(): return cors({'items':get_news()})
 
+@app.route('/stock-info')
+def stock_info():
+    """Context bundle for the AI chat — price, VWAP/EMA signal, ATR levels,
+    and recent news headlines for a given symbol, all in one call."""
+    sym = request.args.get('symbol','').upper()
+    if not sym: return cors({'error':'no symbol'})
+    cached = cp(sym)
+    if not cached:
+        q = fetch_symbol_on_demand(sym)
+        if q: cached = {'price':q['regularMarketPrice'],'pct':q['regularMarketChangePercent']}
+    price = cached['price'] if cached else 0
+    signal = compute_intraday_signal(sym) if price else None
+    levels = compute_atr_levels(sym, price) if price else {}
+    # Grab recent news headlines for this symbol
+    news_items = []
+    try:
+        url = f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym}&region=US&lang=en-US'
+        req = urllib.request.Request(url, headers={'User-Agent': UA})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            tree = ET.fromstring(r.read())
+            for item in list(tree.iter('item'))[:5]:
+                t_el = item.find('title')
+                if t_el is not None and t_el.text:
+                    news_items.append(t_el.text.strip())
+    except Exception:
+        pass
+    # Active position context
+    active_trade = paper['active'].get(sym)
+    return cors({
+        'symbol': sym, 'price': price,
+        'change_pct': cached['pct'] if cached else 0,
+        'signal': signal, 'levels': levels,
+        'news': news_items,
+        'active_trade': active_trade,
+        'total_pnl': paper['total_pnl'],
+        'trade_seq': paper['trade_seq'],
+    })
+
 
 # ── MARKET ALERT SCANNER ──────────────────────────────────────────────
-MAJOR_NEGATIVE = ['war','attack','invasion','sanctions','crash','recession',
-                   'bank failure','emergency','crisis','missile','nuclear',
-                   'default','collapse','surge inflation']
+# ── MARKET ALERT SCANNER ──────────────────────────────────────────────
+# These are INFORMATIONAL alerts shown in the UI banner.
+# Only TRUE_CATASTROPHE events trigger an auto-exit. Everything else
+# is surfaced as a warning so YOU can decide. The FCEL/DRAM/QQQ
+# losses this week all happened because "Fed decision" triggered
+# market_danger, which had zero grace period and killed trades
+# immediately. That's now fixed — the Fed making a routine decision
+# is NOT a reason to close a trade in progress.
+MAJOR_NEGATIVE = [
+    'war declared','military invasion','nuclear strike','terror attack',
+    'exchange suspended','trading halted market','market circuit breaker',
+    'fed emergency','systemic bank failure','lehman','bear stearns',
+    'market crash','stock market crash','flash crash',
+]
+TRUE_CATASTROPHE = [
+    'nuclear','exchange suspended','trading halted market',
+    'market circuit breaker','flash crash','stock market crash',
+]
 MAJOR_POSITIVE = ['rate cut','fed cut','pause rate','rate reduction',
                    'stimulus','deal signed','merger','acquisition',
                    'earnings beat','record high','bull market']
 MAJOR_NEUTRAL  = ['fomc','fed meeting','cpi','jobs report','gdp',
                    'inflation data','federal reserve','rate decision',
-                   'powell','yellen','treasury']
+                   'powell','yellen','treasury','kevin warsh']
 
 _alert_cache = {'alert':None,'ts':0}
 
@@ -1665,24 +1816,27 @@ def scan_market_alerts():
         buying = [w for w in whales if w['direction']=='buying']
         selling = [w for w in whales if w['direction']=='selling']
         if selling: whale_note = f" Heavy volume selling also detected in {selling[0]['symbol']}."
-        elif buying: whale_note = f" Note: heavy volume buying detected in {buying[0]['symbol']} — smart money may disagree."
+        elif buying: whale_note = f" Note: heavy volume buying detected in {buying[0]['symbol']}."
     for n in news:
         title=n['title'].lower()
         for kw in MAJOR_NEGATIVE:
             if kw in title:
-                alert={'type':'danger','icon':'🚨','keyword':kw,
+                # Distinguish true market-halting catastrophe from general negative news.
+                # Only TRUE_CATASTROPHE events will auto-close open positions.
+                is_catastrophe = any(tc in title for tc in TRUE_CATASTROPHE)
+                alert={'type':'danger','catastrophe':is_catastrophe,'icon':'🚨','keyword':kw,
                        'title':n['title']+whale_note,'color':'red'}
                 _alert_cache.update({'alert':alert,'ts':time.time()})
                 return alert
         for kw in MAJOR_POSITIVE:
             if kw in title:
-                alert={'type':'positive','icon':'🚀','keyword':kw,
+                alert={'type':'positive','catastrophe':False,'icon':'🚀','keyword':kw,
                        'title':n['title'],'color':'green'}
                 _alert_cache.update({'alert':alert,'ts':time.time()})
                 return alert
         for kw in MAJOR_NEUTRAL:
             if kw in title:
-                alert={'type':'watch','icon':'⚠️','keyword':kw,
+                alert={'type':'watch','catastrophe':False,'icon':'⚠️','keyword':kw,
                        'title':n['title'],'color':'amber'}
                 _alert_cache.update({'alert':alert,'ts':time.time()})
                 return alert
