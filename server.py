@@ -139,6 +139,30 @@ UNIVERSE = {
 }
 ALL_UNIVERSE = [s for group in UNIVERSE.values() for s in group]
 
+# ── ABIY DAY TRADE UNIVERSE ($1–$20 small-cap movers) ──────────────────
+# Criteria: low-price, high-beta, frequent catalyst-driven 10-20% intraday
+# moves. Kept to ~60 names so scans finish in under 30 seconds.
+ABIY_UNIVERSE = list(dict.fromkeys([
+    # Biotech/pharma — binary catalysts (FDA, trials) cause massive gaps
+    'NVAX','SAVA','ADMA','ATNM','MNKD','CTIC','NKTR','AMRN',
+    'CLOV','HIMS','PRAX','AVTE','MIRA','GYRE','ARQT','IMVT',
+    'RCUS','HOOK','VCNX','ZNTL','IMTX','ADXN','CRBP','ACAD',
+    # EV / clean energy small caps
+    'NKLA','WKHS','SOLO','IDEX','FFIE','MULN','CENN','RIDE',
+    # China ADRs — volatile on policy/macro news
+    'NIO','XPEV','DIDI','TUYA','LKNCY',
+    # Crypto miners (move with BTC, high beta)
+    'MARA','RIOT','HUT','BTBT','CLSK','HIVE','IREN',
+    # Fuel cell / hydrogen
+    'FCEL','PLUG','BLDP','HTOO',
+    # Meme / retail-driven
+    'GME','AMC','BBBY',
+    # Speculative tech
+    'MVIS','VUZI','AEYE','KOPN','INPX',
+    # Biotech/pharma additional
+    'BLUE','FOLD','SAGE','EIGR','VKTX',
+]))
+
 # User custom watchlist (up to 5 stocks)
 custom_watchlist = []
 
@@ -153,7 +177,7 @@ RULES = {
     'NO_ENTRY_BEFORE':    (9,45),# Never enter first 15min — pure chaos
     'NO_ENTRY_AFTER':     (14,30),# No new trades after 2:30PM
     'MIN_SPY_PCT':        -0.5,  # Don't fight a crashing market
-    'MAX_TRADES_PER_DAY': 8,     # Rotate through many trades, don't cap at 3
+    'MAX_TRADES_PER_DAY': 999,     # Rotate through many trades, don't cap at 3
     'UNDERPERFORM_MINUTES':   60,  # After 60 min with little movement...
     'UNDERPERFORM_MIN_PCT':   1.5, # ...and gain is under 1.5%...
     'UNDERPERFORM_SCORE_GAP': 15,  # ...rotate if a candidate scores 15+ higher
@@ -626,6 +650,197 @@ def p_log(msg):
     ts=now_et(); paper['log'].insert(0,{'time':ts,'msg':msg})
     paper['log']=paper['log'][:40]; print(f"  [{ts}] {msg}")
 
+# ── ABIY DAY TRADE — INDEPENDENT STRATEGY ──────────────────────────────
+# Completely separate capital, trades, and history from AutoTrade.
+# Targets $1-$20 small-cap stocks with catalyst-driven 10-20% moves.
+# Telegram notifications are prefixed with [ABIY SCANNER] to distinguish.
+abiy_paper = {
+    'capital':10000.0,'starting_capital':10000.0,'trade_seq':1,
+    'active':{},'completed':[],'total_pnl':0.0,
+    'status':'scanning','picked':None,'date':None,'log':[],
+    'candidates':[],
+}
+ABIY_MIN_PRICE   = 1.0
+ABIY_MAX_PRICE   = 20.0
+ABIY_MIN_VOL     = 2.0
+ABIY_MIN_CHG     = 5.0    # % change minimum for a candidate
+ABIY_TARGET_PCT  = 0.15   # 15% target
+ABIY_STOP_PCT    = 0.07   # 7% stop (wider for small caps)
+
+def a_log(msg):
+    ts=now_et(); abiy_paper['log'].insert(0,{'time':ts,'msg':msg})
+    abiy_paper['log']=abiy_paper['log'][:40]; print(f"  [ABIY {ts}] {msg}")
+
+def a_tg(msg):
+    """Telegram notification prefixed so Abiy knows which strategy sent it."""
+    tg(f"[ABIY SCANNER]\n{msg}")
+
+def score_abiy(q):
+    """Score for the Abiy Day Trade criteria:
+    Price $1-$20, RelVol ≥ 2x, strong % move, small cap catalyst play."""
+    price  = q.get('regularMarketPrice', 0)
+    chg    = q.get('regularMarketChangePercent', 0)
+    vr     = q.get('_vr', 0)
+    mcap   = q.get('marketCap', 1e12)
+    pmkt   = q.get('preMarketChangePercent', 0)
+    if price < ABIY_MIN_PRICE or price > ABIY_MAX_PRICE: return 0
+    if vr < ABIY_MIN_VOL: return 0
+    if chg < ABIY_MIN_CHG: return 0
+    score = 0
+    # Volume is the #1 signal — institutions and retail chasing
+    score += min(40, int(vr * 8))
+    # Momentum — how much it's already moved
+    score += min(30, int(chg * 1.5))
+    # Pre-market gap is a strong catalyst signal
+    if pmkt > 10:  score += 20
+    elif pmkt > 5: score += 12
+    elif pmkt > 0: score += 5
+    # Small cap preference (lower float proxy via market cap)
+    if mcap < 500e6:   score += 10
+    elif mcap < 2e9:   score += 5
+    return min(99, score)
+
+_abiy_scan_lock = threading.Lock()
+_abiy_scanning  = False
+
+def abiy_pick_best():
+    """Scan ABIY_UNIVERSE for the best qualifying small-cap setup."""
+    quotes = get_full_quotes(ABIY_UNIVERSE)
+    spy = cp('SPY'); qqq = cp('QQQ')
+    for q in quotes:
+        q['_score'] = score_abiy(q)
+        q['_vr']    = q.get('_vr', 0)
+    scored = [q for q in quotes if q['_score'] > 0]
+    scored.sort(key=lambda q: q['_score'], reverse=True)
+    abiy_paper['candidates'] = scored[:10]
+    return scored[0] if scored else None
+
+def abiy_enter(q):
+    """Enter a trade in the Abiy strategy with independent capital."""
+    ep    = q.get('regularMarketPrice', 0)
+    cached = cp(q['symbol'])
+    if cached: ep = cached['price']
+    if ep <= 0: return False
+    cap   = abiy_paper['capital']
+    shrs  = int(cap / ep)
+    if shrs < 1: return False
+    tnum  = abiy_paper['trade_seq']
+    lvl   = compute_atr_levels(q['symbol'], ep)
+    trade = {
+        'symbol':q['symbol'],'name':q.get('shortName',q['symbol']),
+        'trade_num':tnum,'shares':shrs,'entry':round(ep,2),
+        'cost':round(shrs*ep,2),'target':lvl['target'],'stop':lvl['stop'],
+        'entry_time':now_et(),'current':round(ep,2),'peak':round(ep,2),
+        'peak_pnl_pct':0.0,'entered_at':time.time(),'score':q.get('_score',0),
+    }
+    abiy_paper['active'][q['symbol']] = trade
+    abiy_paper['status'] = 'entered'
+    abiy_paper['capital'] = 0
+    save_abiy_state()
+    a_log(f"ENTERED {q['symbol']} {shrs}sh @ ${ep:.2f}")
+    a_tg(
+        f"📈 ABIY TRADE #{tnum} ENTERED\n{'━'*22}\n"
+        f"Stock: {q['symbol']} — {q.get('shortName','')}\n"
+        f"Shares: {shrs} @ ${ep:.2f} | Cost: ${shrs*ep:,.2f}\n{'━'*22}\n"
+        f"Target: ${lvl['target']:.2f} (+{lvl['target_pct']:.1f}%)\n"
+        f"Stop:   ${lvl['stop']:.2f} (-{lvl['stop_pct']:.1f}%)\n"
+        f"Score: {q.get('_score',0)}/99 | Vol {q.get('_vr',0):.1f}x | Chg {q.get('regularMarketChangePercent',0):+.1f}%\n"
+        f"Catalyst: small-cap momentum play (${ep:.2f})\n{get_app_url()}"
+    )
+    return True
+
+def abiy_close(sym, reason='target'):
+    if sym not in abiy_paper['active']: return
+    t = abiy_paper['active'].pop(sym)
+    cached = cp(sym); sell = cached['price'] if cached else t['current']
+    pnl  = (sell - t['entry']) * t['shares']
+    pct  = (sell - t['entry']) / t['entry'] * 100
+    proceeds = round(t['cost'] + pnl, 2)
+    labels = {'target':'TARGET HIT 🎯','stop':'STOP HIT 🛑','manual':'MANUAL EXIT',
+              'momentum_stall':'MOMENTUM STALL 🔄','eod':'EOD CLOSE'}
+    abiy_paper['completed'].append({**t,'exit':sell,'exit_time':now_et(),'pnl':pnl,'pnl_pct':pct,'reason':reason})
+    abiy_paper['total_pnl'] += pnl
+    abiy_paper['capital']    = proceeds
+    abiy_paper['trade_seq'] += 1
+    abiy_paper['status']     = 'scanning'
+    save_abiy_state()
+    icon = '✅' if pnl >= 0 else '🔴'
+    a_log(f"CLOSED {sym} {reason} P&L ${pnl:+.2f} ({pct:+.1f}%)")
+    a_tg(
+        f"{icon} ABIY T{t['trade_num']} CLOSED — {labels.get(reason,reason.upper())}\n{'━'*22}\n"
+        f"{sym}: {t['shares']}sh\n"
+        f"Entry ${t['entry']:.2f} → Exit ${sell:.2f}\n"
+        f"P&L: {'✅' if pnl>=0 else '🔴'} ${pnl:+.2f} ({pct:+.2f}%)\n"
+        f"Capital: ${proceeds:,.2f} | Total: ${abiy_paper['total_pnl']:+.2f}\n{get_app_url()}"
+    )
+
+ABIY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'abiy_state.json')
+
+def save_abiy_state():
+    try:
+        with open(ABIY_STATE_FILE,'w') as f:
+            json.dump({'date':abiy_paper['date'],'capital':abiy_paper['capital'],
+                       'trade_seq':abiy_paper['trade_seq'],'completed':abiy_paper['completed'],
+                       'total_pnl':abiy_paper['total_pnl'],'status':abiy_paper['status']},f)
+    except Exception as e: print(f"  save_abiy: {e}")
+
+def load_abiy_state():
+    if not os.path.exists(ABIY_STATE_FILE): return
+    try:
+        with open(ABIY_STATE_FILE) as f: snap=json.load(f)
+        today=datetime.now(ET_TZ).date().isoformat()
+        if snap.get('date')!=today: return
+        abiy_paper.update({'date':snap['date'],'capital':snap.get('capital',10000),
+                           'trade_seq':snap.get('trade_seq',1),'completed':snap.get('completed',[]),
+                           'total_pnl':snap.get('total_pnl',0),'status':'scanning','active':{}})
+    except Exception as e: print(f"  load_abiy: {e}")
+
+def job_abiy_scan():
+    """Per-minute Abiy Day Trade monitor — runs alongside AutoTrade independently."""
+    if not is_trading_day(): return
+    abiy_paper['date'] = datetime.now(ET_TZ).date().isoformat()
+    # Monitor open positions
+    for sym, t in list(abiy_paper['active'].items()):
+        cached = cp(sym)
+        if not cached: continue
+        price = cached['price']
+        abiy_paper['active'][sym]['current'] = price
+        pnl_pct = (price - t['entry']) / t['entry'] * 100
+        peak_pct = max(t.get('peak_pnl_pct',0), pnl_pct)
+        abiy_paper['active'][sym]['peak_pnl_pct'] = peak_pct
+        if price >= t['target']:
+            abiy_close(sym,'target'); continue
+        if price <= t['stop']:
+            abiy_close(sym,'stop'); continue
+        # Trailing stop: lock in gains if up 8%+ then gives back 5pts
+        if peak_pct >= 8 and (peak_pct - pnl_pct) >= 5:
+            abiy_close(sym,'momentum_stall'); continue
+    # Scan for new entry if no active position and market is open
+    if not abiy_paper['active'] and is_market_open():
+        global _abiy_scanning
+        with _abiy_scan_lock:
+            if _abiy_scanning: return
+            _abiy_scanning = True
+        def _do_abiy_scan():
+            global _abiy_scanning
+            try:
+                q = abiy_pick_best()
+                if q:
+                    a_tg(
+                        f"🔍 ABIY SCANNER — SETUP FOUND\n{'━'*22}\n"
+                        f"#{q['symbol']} @ ${q.get('regularMarketPrice',0):.2f}\n"
+                        f"Score {q['_score']}/99 | Vol {q.get('_vr',0):.1f}x | Chg {q.get('regularMarketChangePercent',0):+.1f}%\n"
+                        f"Entry zone: ${q.get('regularMarketPrice',0):.2f} | "
+                        f"Target +{ABIY_TARGET_PCT*100:.0f}% | Stop -{ABIY_STOP_PCT*100:.0f}%\n"
+                        f"Risk: {'High' if q.get('_vr',0)>5 else 'Medium'} | Small-cap catalyst play\n"
+                        f"Awaiting next scan.\n{get_app_url()}"
+                    )
+                    abiy_paper['picked'] = q
+                    abiy_enter(q)
+            finally:
+                _abiy_scanning = False
+        threading.Thread(target=_do_abiy_scan, daemon=True).start()
+
 # ── SIMULATED OPTIONS CANDIDATES TRACKER ───────────────────────────────
 # Educational estimate only — NOT real options data or a real options fill.
 # Approximates an option's P&L as (underlying % move) x OPTIONS_LEVERAGE.
@@ -852,22 +1067,20 @@ def close_trade(sym, reason='target'):
         f"Capital: ${proceeds:,.2f}\n"
         f"Total: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}"
     )
-    nxt = paper['trade_seq']+1
+    nxt = paper['trade_seq'] + 1
     locked = paper.get('pro_locked_symbol')
-    multi_day_closed = t.get('multi_day', False)
-    can_rotate, _ = can_enter() if not locked else (True, "OK")
-    if nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open() and can_rotate:
-        paper['trade_seq']=nxt; paper['status']='waiting'
+    paper['trade_seq'] = nxt
+    if is_market_open() or is_premarket_window():
+        paper['status'] = 'waiting'
         if locked:
-            tg(f"🎯 Watching {locked} for the next VWAP/EMA buy signal (Abiy PRO Live)...")
+            tg(f"🎯 Watching {locked} for the next VWAP/EMA buy signal...")
         else:
-            tg(f"🔍 Trade {nxt}/{RULES['MAX_TRADES_PER_DAY']} — scanning for next setup...")
+            tg(f"🔍 Trade #{nxt} — scanning for next setup...")
         threading.Thread(target=_auto_pick_enter, daemon=True).start()
-    elif nxt<=RULES['MAX_TRADES_PER_DAY'] and is_market_open():
-        paper['status']='waiting'
     else:
-        paper['status']='done'
-        tg(f"✅ Max trades ({RULES['MAX_TRADES_PER_DAY']}) reached for today!\nTotal: {'+'if paper['total_pnl']>=0 else''}${paper['total_pnl']:,.2f}\n{get_app_url()}")
+        # Market closed (e.g. after pre-market trade closed) — wait for open
+        paper['status'] = 'waiting'
+        p_log(f"Trade closed outside market hours — will resume scanning at open")
 
 _pick_lock = threading.Lock()
 _picking_now = False
@@ -1220,26 +1433,19 @@ def job_monitor():
         peak_pct = (peak - t['entry']) / t['entry'] * 100
         paper['active'][sym]['peak_pnl_pct'] = max(peak_pct, t.get('peak_pnl_pct', 0))
 
-        # 1. News exit — heavily tightened after the DRAM/QQQ losses (Jun 18).
-        # The root cause: "Fed decision" triggered market_danger with zero grace
-        # period, killing every trade within 60 seconds. New rules:
-        #   a) Never exit in the first 10 min (news existed before we entered)
-        #   b) Market-wide alerts only auto-exit on TRUE catastrophe (exchange
-        #      halt, nuclear, flash crash). Fed meetings, rate decisions, bank
-        #      news etc → show the banner, but DON'T force-close positions.
-        #   c) Per-symbol news needs 5-min grace AND price must be -0.5%+
-        #      below entry to confirm the headline is actually hurting the stock.
+        # 1. News check — INFORMATIONAL ONLY. News exits have caused every
+        # loss this week (FCEL, DRAM×8, QQQ) while the price was flat or rising.
+        # ATR-based hard stop and trailing stop handle all downside risk.
+        # We log bad headlines but NEVER auto-close based on news alone.
         held_sec = time.time() - t.get('entered_at', time.time())
-        if held_sec > 600:  # 10-minute minimum hold before any news exit
-            true_catastrophe = mkt_alert and mkt_alert.get('catastrophe') and mkt_alert.get('type')=='danger'
-            price_confirms_damage = price < t['entry'] * 0.995
-            symbol_news_hit = held_sec > 300 and check_symbol_news(sym) and price_confirms_damage
-            if true_catastrophe or symbol_news_hit:
-                label = mkt_alert['title'] if true_catastrophe else f"Negative headline + price decline on {sym}"
-                paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 News exit: {label}", 'ts': now_et()}
-                p_log(f"NEWS EXIT {sym}: {label} (held {held_sec:.0f}s, price ${price:.2f} vs entry ${t['entry']:.2f})")
-                close_trade(sym, 'news_exit')
-                continue
+        if held_sec > 600:
+            mkt_catastrophe = mkt_alert and mkt_alert.get('catastrophe')
+            if mkt_catastrophe:
+                p_log(f"CATASTROPHE ALERT while holding {sym}: {mkt_alert['title']} — monitoring closely")
+                # Only exit on a true market catastrophe AND price already down 3%+
+                if price < t['entry'] * 0.97:
+                    paper['trade_alert'] = {'symbol': sym, 'msg': f"🚨 Catastrophe exit: {mkt_alert['title']}", 'ts': now_et()}
+                    close_trade(sym, 'news_exit'); continue
 
         multi_day = t.get('multi_day', False)
 
@@ -1773,8 +1979,15 @@ MAJOR_NEGATIVE = [
     'market crash','stock market crash','flash crash',
 ]
 TRUE_CATASTROPHE = [
-    'nuclear','exchange suspended','trading halted market',
-    'market circuit breaker','flash crash','stock market crash',
+    'exchange suspended trading',
+    'nyse suspended',
+    'nasdaq suspended',
+    'market circuit breaker triggered',
+    'trading halted all stocks',
+    'flash crash',
+    'stock market crash',
+    'nuclear strike',
+    'nuclear attack',
 ]
 MAJOR_POSITIVE = ['rate cut','fed cut','pause rate','rate reduction',
                    'stimulus','deal signed','merger','acquisition',
@@ -1847,6 +2060,39 @@ def scan_market_alerts():
 def whale_activity_route():
     return cors({'whales': scan_whale_activity()})
 
+# ── ABIY DAY TRADE ROUTES ──────────────────────────────────────────────
+@app.route('/abiy-status')
+def abiy_status():
+    active_out = {}
+    for sym,t in abiy_paper['active'].items():
+        cached=cp(sym); cur=cached['price'] if cached else t['current']
+        pnl=(cur-t['entry'])*t['shares']; pct=(cur-t['entry'])/t['entry']*100
+        active_out[sym]={**t,'current':cur,'pnl':round(pnl,2),'pnl_pct':round(pct,2)}
+    return cors({
+        'capital':abiy_paper['capital'],'starting_capital':abiy_paper['starting_capital'],
+        'total_pnl':abiy_paper['total_pnl'],'trade_seq':abiy_paper['trade_seq'],
+        'status':abiy_paper['status'],'active':active_out,
+        'completed':abiy_paper['completed'][-20:],
+        'candidates':abiy_paper['candidates'][:5],
+        'log':abiy_paper['log'][:8],
+    })
+
+@app.route('/abiy-close-trade',methods=['POST'])
+def abiy_close_trade():
+    data=request.get_json() or {}
+    sym=data.get('symbol','').upper()
+    if sym not in abiy_paper['active']:
+        return cors({'ok':False,'msg':f'{sym} not in active Abiy trades'})
+    abiy_close(sym,'manual')
+    return cors({'ok':True,'msg':f'Closed {sym}'})
+
+@app.route('/abiy-force-pick')
+def abiy_force_pick():
+    if abiy_paper['active']:
+        return cors({'ok':False,'msg':'Already in a trade'})
+    threading.Thread(target=job_abiy_scan,daemon=True).start()
+    return cors({'ok':True})
+
 @app.route('/market-summary')
 def market_summary():
     brief,is_ai=get_brief(); return cors({'brief':brief,'ai':is_ai})
@@ -1912,6 +2158,7 @@ def notify(): return cors({'ok':tg(request.args.get('msg','')) if request.args.g
 
 # ── START ─────────────────────────────────────────────────────────────
 load_state()
+load_abiy_state()
 threading.Thread(target=price_thread,daemon=True).start()
 import atexit
 try:
@@ -1921,8 +2168,9 @@ try:
     sched.add_job(job_monitor,    'cron',day_of_week='mon-fri',hour='8-16',minute='*')
     sched.add_job(job_eod,        'cron',day_of_week='mon-fri',hour=15,minute=55)
     sched.add_job(job_keepalive,  'interval',minutes=10)
+    sched.add_job(job_abiy_scan,  'cron',day_of_week='mon-fri',hour='9-16',minute='*')
     sched.start(); atexit.register(lambda:sched.shutdown(wait=False))
-    print(f"  Scheduler: {len(sched.get_jobs())} jobs | Universe: {len(ALL_UNIVERSE)} stocks")
+    print(f"  Scheduler: {len(sched.get_jobs())} jobs | Universe: {len(ALL_UNIVERSE)} + {len(ABIY_UNIVERSE)} abiy")
 except Exception as e: print(f"  Scheduler: {e}")
 
 if __name__=='__main__':

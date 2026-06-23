@@ -244,6 +244,15 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 /* ══ WATCHLIST TAB ═══════════════════════════════════════════ */
 .wl-page{padding:9px;height:100%;overflow-y:auto}
 .pro-page{padding:9px;height:100%;overflow-y:auto}
+.abiy-page{padding:9px;height:100%;overflow-y:auto}
+.abiy-header{display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,rgba(239,68,68,.08),rgba(249,115,22,.08));border:1px solid rgba(239,68,68,.25);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+.abiy-title{font-size:13px;font-weight:800;color:var(--t1)}
+.abiy-sub{font-size:8px;color:var(--t3);font-family:var(--mono);margin-top:2px}
+.abiy-pnl{font-size:18px;font-weight:900;font-family:var(--mono)}
+.abiy-cand{display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:7px;padding:8px 11px;margin-bottom:5px;border-left:3px solid var(--red)}
+.abiy-cand-sym{font-size:13px;font-weight:800;font-family:var(--mono)}
+.abiy-cand-meta{font-size:8px;color:var(--t3);font-family:var(--mono);margin-top:2px}
+.abiy-cand-score{font-size:11px;font-weight:700;font-family:var(--mono);color:var(--amber)}
 /* Inline AI chat panel */
 .inline-chat-msgs{max-height:140px;overflow-y:auto;display:flex;flex-direction:column;gap:5px;margin-bottom:7px}
 .inline-chat-row{display:flex;gap:6px}
@@ -357,7 +366,8 @@ input:checked+.toggle-slider:before{transform:translateX(15px);background:var(--
 <div class="tabs" id="tabs">
   <button class="tab active" onclick="switchTab('trade',this)">📈 AutoTrade</button>
   <button class="tab" onclick="switchTab('watchlist',this)">⭐ Watchlist</button>
-  <button class="tab" onclick="switchTab('prolive',this)">🎯 Abiy PRO Live</button>
+  <button class="tab" onclick="switchTab('prolive',this)">🎯 PRO Live</button>
+  <button class="tab" onclick="switchTab('abiy',this)">🔥 Abiy Scanner</button>
   <button class="tab" onclick="switchTab('chat',this)">💬 AI Chat</button>
 </div>
 
@@ -553,6 +563,77 @@ input:checked+.toggle-slider:before{transform:translateX(15px);background:var(--
     </div>
   </div>
 
+  <!-- ABIY DAY TRADE SCANNER TAB -->
+  <div class="tab-page" id="tab-abiy">
+    <div class="abiy-page">
+
+      <!-- Header strip -->
+      <div class="abiy-header">
+        <div>
+          <div class="abiy-title">🔥 Abiy Day Trade Scanner</div>
+          <div class="abiy-sub">$1–$20 · RelVol ≥ 2x · Catalyst-driven · Separate capital</div>
+        </div>
+        <div id="abiy-pnl" class="abiy-pnl">+$0.00</div>
+      </div>
+
+      <!-- Capital + P&L strip -->
+      <div class="pnl-row" style="margin-bottom:8px">
+        <div class="pnl-item"><div class="pnl-lbl">Capital</div><div class="pnl-val" id="abiy-cap">$10,000</div></div>
+        <div class="pnl-item"><div class="pnl-lbl">Trades</div><div class="pnl-val" id="abiy-seq">0</div></div>
+        <div class="pnl-item"><div class="pnl-lbl">P&L Total</div><div class="pnl-val" id="abiy-total">+$0.00</div></div>
+      </div>
+
+      <!-- Active trade card -->
+      <div id="abiy-trade-body"></div>
+
+      <!-- Top candidates -->
+      <div class="card" style="margin-bottom:8px">
+        <div class="card-t">🔍 Scanner Candidates <span class="cbadge" id="abiy-scan-status">scanning...</span></div>
+        <div id="abiy-candidates"><div class="empty">Scanning $1–$20 movers...</div></div>
+      </div>
+
+      <!-- Chart -->
+      <div class="card" id="abiy-chart-card" style="display:none;margin-bottom:8px">
+        <div class="pro-chart-head">
+          <span class="live-dot"></span>
+          <span id="abiy-chart-sym" style="font-size:10px;font-weight:700;font-family:var(--mono)">—</span>
+          <span id="abiy-chart-price" style="font-size:13px;font-weight:800;font-family:var(--mono);margin-left:auto">—</span>
+        </div>
+        <canvas id="abiy-canvas" style="width:100%;height:200px;display:block"></canvas>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);margin-top:6px;display:flex;gap:10px">
+          <span><span style="color:var(--green)">●</span> BUY</span>
+          <span><span style="color:var(--red)">●</span> SELL</span>
+          <span><span style="color:#f59e0b">━</span> VWAP</span>
+        </div>
+      </div>
+
+      <!-- Inline AI chat scoped to Abiy active symbol -->
+      <div class="card" id="abiy-chat-card">
+        <div class="card-t">🤖 AI Chat <span class="cbadge" id="abiy-chat-sym">Abiy Scanner</span></div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">
+          <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="abiyQuickChat('Is this a good entry for a 10-20% move?')">Good entry?</button>
+          <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="abiyQuickChat('What is the catalyst for this stock today?')">Catalyst?</button>
+          <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="abiyQuickChat('Hold or take profit now?')">Hold or sell?</button>
+          <button class="suggest-btn" style="font-size:9px;padding:3px 8px" onclick="abiyQuickChat('What are the key risk levels?')">Risk levels?</button>
+        </div>
+        <div class="inline-chat-msgs" id="abiy-chat-msgs"></div>
+        <div class="inline-chat-row">
+          <input class="wl-inp" id="abiy-chat-inp" placeholder="Ask about Abiy scanner picks..." onkeydown="if(event.key==='Enter')sendAbiyChat()" style="font-size:11px;padding:7px 10px">
+          <button class="wl-btn-add" onclick="sendAbiyChat()" style="padding:7px 12px;font-size:10px">Ask</button>
+        </div>
+      </div>
+
+      <!-- Completed trades -->
+      <div id="abiy-hist-body"></div>
+
+      <!-- Controls -->
+      <div class="ctrl-row" style="margin-top:8px">
+        <button class="cbtn cbtn-g" onclick="abiyForcePick()">🔍 Force Scan</button>
+        <button class="cbtn cbtn-r" id="abiy-close-btn" onclick="abiyCloseActive()" style="display:none">🛑 Close Trade</button>
+      </div>
+    </div>
+  </div>
+
   <!-- CHAT TAB -->
   <div class="tab-page" id="tab-chat">
     <div class="chat-page">
@@ -643,6 +724,7 @@ function switchTab(name,el){
   document.getElementById('tab-'+name).classList.add('active');
   if(name==='watchlist')refreshWLT();
   if(name==='prolive')refreshProLive();
+  if(name==='abiy')refreshAbiy();
 }
 
 // ── CLOCK ─────────────────────────────────────────────────────────────
@@ -1360,6 +1442,154 @@ function quickInlineChat(msg){
   document.getElementById('inline-chat-inp').value=msg;
   sendInlineChat();
 }
+
+// ── ABIY DAY TRADE SCANNER TAB ────────────────────────────────────────
+let abiyActiveSym = null;
+async function refreshAbiy(){
+  try{
+    const d=await(await authFetch('/abiy-status')).json();
+    // P&L header
+    const pnl=d.total_pnl||0;
+    const pnlEl=document.getElementById('abiy-pnl');
+    if(pnlEl){pnlEl.textContent=(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2);pnlEl.style.color=pnl>=0?'var(--green)':'var(--red)';}
+    const totalEl=document.getElementById('abiy-total');
+    if(totalEl){totalEl.textContent=(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2);totalEl.style.color=pnl>=0?'var(--green)':'var(--red)';}
+    document.getElementById('abiy-cap').textContent='$'+(d.capital||0).toFixed(2);
+    document.getElementById('abiy-seq').textContent='#'+(d.trade_seq||1);
+
+    // Active trade
+    const body=document.getElementById('abiy-trade-body');
+    const closeBtn=document.getElementById('abiy-close-btn');
+    const chartCard=document.getElementById('abiy-chart-card');
+    const active=d.active&&Object.values(d.active)[0];
+    if(active){
+      abiyActiveSym=active.symbol;
+      document.getElementById('abiy-chat-sym').textContent=active.symbol;
+      document.getElementById('abiy-chart-sym').textContent=active.symbol;
+      document.getElementById('abiy-chart-price').textContent='$'+active.current.toFixed(2);
+      document.getElementById('abiy-chart-price').style.color=active.pnl_pct>=0?'var(--green)':'var(--red)';
+      if(chartCard)chartCard.style.display='block';
+      const pos=active.pnl_pct>=0;
+      const p=Math.min(100,Math.max(0,(active.current-active.stop)/(active.target-active.stop)*100));
+      body.innerHTML=`<div class="tc ${pos?'tc-live':'tc-stop'}" style="margin-bottom:8px">
+        <div class="tc-head"><div>
+          <div class="tc-sym">${active.symbol} <span style="font-size:10px;color:var(--amber)">ABIY</span></div>
+          <div class="tc-name">${active.name} · #${active.trade_num} · Score ${active.score}/99</div>
+        </div>
+        <div><div class="tc-pnl" style="color:${pos?'var(--green)':'var(--red)'}">${active.pnl>=0?'+$':'-$'}${Math.abs(active.pnl).toFixed(2)}</div>
+        <div class="tc-pnl-pct" style="color:${pos?'var(--green)':'var(--red)'}">${active.pnl_pct>=0?'+':''}${active.pnl_pct.toFixed(2)}%</div></div></div>
+        <div class="tc-stats">
+          <div class="ts-item"><div class="ts-lbl">Entry</div><div class="ts-val">$${active.entry.toFixed(2)}</div></div>
+          <div class="ts-item"><div class="ts-lbl">Now</div><div class="ts-val" style="color:${pos?'var(--green)':'var(--red)'}">$${active.current.toFixed(2)}</div></div>
+          <div class="ts-item"><div class="ts-lbl" style="color:var(--green)">Target</div><div class="ts-val" style="color:var(--green)">$${active.target.toFixed(2)}</div></div>
+          <div class="ts-item"><div class="ts-lbl" style="color:var(--red)">Stop</div><div class="ts-val" style="color:var(--red)">$${active.stop.toFixed(2)}</div></div>
+        </div>
+        <div class="prog-bar"><div class="prog-fill ${pos?'pf-p':'pf-n'}" style="width:${p}%"></div></div>
+      </div>`;
+      if(closeBtn)closeBtn.style.display='block';
+      loadAbiyChart(active.symbol);
+    }else{
+      abiyActiveSym=null; body.innerHTML='';
+      if(closeBtn)closeBtn.style.display='none';
+      if(chartCard)chartCard.style.display='none';
+    }
+
+    // Candidates
+    const candEl=document.getElementById('abiy-candidates');
+    const status=document.getElementById('abiy-scan-status');
+    const cands=d.candidates||[];
+    if(status)status.textContent=cands.length?cands.length+' found':'scanning...';
+    if(candEl){
+      if(!cands.length){candEl.innerHTML='<div class="empty">Scanning $1–$20 universe for catalyst movers...</div>';}
+      else{candEl.innerHTML=cands.map(c=>
+        `<div class="abiy-cand">
+          <div><div class="abiy-cand-sym">${c.symbol}</div>
+          <div class="abiy-cand-meta">$${(c.regularMarketPrice||0).toFixed(2)} · Vol ${(c._vr||0).toFixed(1)}x · Chg ${(c.regularMarketChangePercent||0)>=0?'+':''}${(c.regularMarketChangePercent||0).toFixed(1)}%</div></div>
+          <div class="abiy-cand-score">${c._score}/99</div>
+        </div>`).join('');}
+    }
+
+    // History
+    const hist=d.completed||[];
+    const histEl=document.getElementById('abiy-hist-body');
+    if(histEl&&hist.length){
+      histEl.innerHTML='<div class="hist-compact">'+hist.slice().reverse().slice(0,10).map(t=>{
+        const w=t.pnl>=0;
+        return `<div class="hc-item ${w?'hc-w':'hc-l'}"><div><div class="hc-sym">#${t.trade_num} ${t.symbol}</div><div class="hc-meta">${t.reason.toUpperCase()} ${t.entry_time}</div></div><div class="hc-pnl" style="color:${w?'var(--green)':'var(--red)'}">${t.pnl>=0?'+$':'-$'}${Math.abs(t.pnl).toFixed(2)}<div style="font-size:8px">${t.pnl_pct>=0?'+':''}${t.pnl_pct.toFixed(1)}%</div></div></div>`;
+      }).join('')+'</div>';
+    }
+  }catch(e){}
+}
+async function loadAbiyChart(sym){
+  try{
+    const [cd,md]=await Promise.all([
+      authFetch('/candles?symbol='+sym).then(r=>r.json()),
+      authFetch('/trade-markers?symbol='+sym).then(r=>r.json())
+    ]);
+    const canvas=document.getElementById('abiy-canvas');
+    if(!canvas)return;
+    drawCandleChart(canvas, cd.bars||[], 200);
+    // overlay markers
+    if((md.markers||[]).length && (cd.bars||[]).length){
+      const dpr=window.devicePixelRatio||1;
+      const bars=cd.bars; const h=200;
+      const ctx=canvas.getContext('2d');
+      const padL=2,padR=46,padT=8,padB=18;
+      const pw=(canvas.clientWidth||400)-padL-padR, ph=h-padT-padB;
+      const allH=bars.map(b=>b.h),allL=bars.map(b=>b.l);
+      const hi=Math.max(...allH),lo=Math.min(...allL),rng=(hi-lo)||1;
+      const cw=pw/bars.length;
+      const fy=v=>(padT+ph-((v-lo)/rng*ph))*dpr;
+      const fx=i=>(padL+i*cw+cw/2)*dpr;
+      md.markers.forEach(m=>{
+        const hm=(m.time||'').split(' ')[0];
+        let idx=bars.findIndex(b=>b.hm===hm);
+        if(idx<0)idx=m.type==='buy'?0:bars.length-1;
+        const x=fx(idx),y=fy(m.price),col=m.type==='buy'?'#34d399':'#f87171';
+        ctx.fillStyle=col;ctx.beginPath();ctx.arc(x,y,4*dpr,0,Math.PI*2);ctx.fill();
+        ctx.font=(9*dpr)+'px monospace';ctx.fillStyle=col;
+        ctx.fillText(m.type==='buy'?'BUY':'SELL',Math.max(2,x-12*dpr),m.type==='buy'?Math.min(h*dpr-20,y+14*dpr):Math.max(12,y-8*dpr));
+      });
+    }
+  }catch(e){}
+}
+async function abiyForcePick(){
+  try{
+    await authFetch('/abiy-force-pick');
+    toast('🔍 Abiy scanner triggered');
+    setTimeout(refreshAbiy,3000);
+  }catch(e){toast('❌ Failed');}
+}
+async function abiyCloseActive(){
+  if(!abiyActiveSym)return;
+  if(!confirm('Close '+abiyActiveSym+' now?'))return;
+  try{
+    const d=await(await authFetch('/abiy-close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:abiyActiveSym})})).json();
+    toast(d.ok?'✅ Closed '+abiyActiveSym:'❌ '+d.msg);
+    setTimeout(refreshAbiy,1500);
+  }catch(e){toast('❌ Failed');}
+}
+// Inline AI chat for Abiy tab
+function abiyQuickChat(msg){document.getElementById('abiy-chat-inp').value=msg;sendAbiyChat();}
+async function sendAbiyChat(){
+  const inp=document.getElementById('abiy-chat-inp');
+  const msg=inp.value.trim();if(!msg)return;inp.value='';
+  const msgs=document.getElementById('abiy-chat-msgs');
+  const ud=document.createElement('div');ud.className='icm-user';ud.textContent=msg;msgs.appendChild(ud);
+  const tid='abt'+Date.now();const dot=document.createElement('div');
+  dot.id=tid;dot.className='icm-ai';dot.innerHTML='<div class="icm-lbl">🤖 Abiy AI</div><div class="typing-dots"><span></span><span></span><span></span></div>';
+  msgs.appendChild(dot);msgs.scrollTop=msgs.scrollHeight;
+  try{
+    const body={message:msg};
+    if(abiyActiveSym)body.symbol=abiyActiveSym;
+    const d=await(await authFetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    document.getElementById(tid)?.remove();
+    const ad=document.createElement('div');ad.className='icm-ai';
+    ad.innerHTML=`<div class="icm-lbl">🤖 Abiy AI</div>${d.response||'—'}`;
+    msgs.appendChild(ad);msgs.scrollTop=msgs.scrollHeight;
+  }catch(e){document.getElementById(tid)?.remove();}
+}
+setInterval(()=>{if(document.getElementById('tab-abiy').classList.contains('active'))refreshAbiy();},4000);
 </script>
 </body>
 </html>
