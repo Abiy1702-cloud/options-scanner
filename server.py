@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""AutoTrade Pro — 3-Tab Rebuild: Day Trade Picks | Options | Custom Research"""
-import json, os, time, threading, urllib.request, concurrent.futures
+"""
+AutoTrade Pro v3 — Whale Intelligence Platform
+Sources: SEC Form 4, Congress Trades, Unusual Whales free, yfinance, Alpaca
+Modes: Day Trade | Swing Trade | Long Term — all auto-managed
+"""
+import json, os, time, threading, urllib.request, urllib.parse, re, hashlib, concurrent.futures
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 
 try:
-    import yfinance as yf, pandas as pd, pytz
+    import yfinance as yf, pandas as pd, numpy as np, pytz
     from apscheduler.schedulers.background import BackgroundScheduler
 except ImportError as e:
-    print(f"Missing: {e}"); raise SystemExit(1)
+    print(f"Missing dep: {e}"); raise SystemExit(1)
 
 # ── ENV ───────────────────────────────────────────────────────────────
 ALPACA_KEY    = os.environ.get('ALPACA_API_KEY','')
@@ -18,1130 +22,919 @@ GROQ_KEY      = os.environ.get('GROQ_API_KEY','')
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY','')
 TELEGRAM_TOKEN= os.environ.get('TELEGRAM_BOT_TOKEN','')
 TELEGRAM_CHAT = os.environ.get('TELEGRAM_CHAT_ID','')
-APP_URL       = os.environ.get('APP_URL','https://your-app.onrender.com')
+APP_URL       = os.environ.get('APP_URL','')
+ABIY_PIN      = os.environ.get('ABIY_PIN','').strip()
 PORT          = int(os.environ.get('PORT', 8765))
 ET_TZ         = pytz.timezone('America/New_York')
-UA            = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+UA            = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
-_detected_app_url = None
-def get_app_url():
-    if APP_URL and 'your-app' not in APP_URL: return APP_URL
-    return _detected_app_url or APP_URL
-
-# ── ALPACA ────────────────────────────────────────────────────────────
 alpaca_trading = alpaca_data = None
 if ALPACA_KEY and ALPACA_SECRET:
     try:
         from alpaca.trading.client import TradingClient
-        from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+        from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestTradeRequest
         alpaca_trading = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=True)
         alpaca_data    = StockHistoricalDataClient(ALPACA_KEY, ALPACA_SECRET)
-        print("  Alpaca connected ✅")
-    except Exception as e:
-        print(f"  Alpaca: {e}")
+        print("Alpaca ✅")
+    except Exception as e: print(f"Alpaca: {e}")
 
 app = Flask(__name__, static_folder='.')
 
-# ── PIN AUTH ──────────────────────────────────────────────────────────
-import hashlib
-ABIY_PIN = os.environ.get('ABIY_PIN','').strip()
-def _expected_token():
-    return hashlib.sha256((ABIY_PIN+'autotrade-pro-salt-2026').encode()).hexdigest()
-_PUBLIC_PATHS = {'/','/ping','/unlock'}
+# ── AUTH ──────────────────────────────────────────────────────────────
+def _token():
+    return hashlib.sha256((ABIY_PIN+'atp-whale-2026').encode()).hexdigest() if ABIY_PIN else ''
 
 @app.before_request
-def _detect_url():
-    global _detected_app_url
-    if _detected_app_url is None and request.host and 'localhost' not in request.host:
-        _detected_app_url = f"https://{request.host}"
-
-@app.before_request
-def _check_auth():
-    if not ABIY_PIN or request.path in _PUBLIC_PATHS: return None
-    if request.headers.get('X-Auth','') != _expected_token():
-        return jsonify({'ok':False,'locked':True,'msg':'Enter your code to unlock'}), 401
+def _auth():
+    pub = {'/','/ping','/unlock','/favicon.ico'}
+    if not ABIY_PIN or request.path in pub: return
+    if request.headers.get('X-Auth','') != _token():
+        return jsonify({'ok':False,'locked':True}), 401
 
 @app.route('/unlock', methods=['POST'])
 def unlock():
-    if not ABIY_PIN: return cors({'ok':True,'token':'','gated':False})
-    data = request.get_json() or {}
-    if str(data.get('pin','')) == ABIY_PIN:
-        return cors({'ok':True,'token':_expected_token(),'gated':True})
-    return cors({'ok':False,'msg':'Incorrect code'})
+    if not ABIY_PIN: return _cors({'ok':True,'token':'','gated':False})
+    d = request.get_json() or {}
+    if str(d.get('pin','')) == ABIY_PIN:
+        return _cors({'ok':True,'token':_token(),'gated':True})
+    return _cors({'ok':False,'msg':'Wrong code'})
 
-# ── UNIVERSE ──────────────────────────────────────────────────────────
-UNIVERSE = [
-    # 3x ETFs — best for 10%+ daily
-    'SOXL','TQQQ','UPRO','TECL','LABU','SPXL','TNA','FNGU',
-    # Crypto / high beta
-    'MSTR','COIN','MARA','RIOT','HUT','CLSK',
-    # AI / Semi
-    'NVDA','AMD','SMCI','PLTR','IONQ','RGTI','SOUN',
-    # Momentum
-    'SOFI','UPST','APP','HIMS','RKLB','ASTS','SMR',
-    # More semis + growth
-    'MU','AVGO','ARM','DRAM','NVDL',
-    # Biotech volatile
-    'MRNA','CRSP',
-    # EV
-    'TSLA','RIVN',
-    # Meme
-    'GME',
-]
+# ── HELPERS ───────────────────────────────────────────────────────────
+def _cors(d):
+    r = jsonify(d); r.headers['Access-Control-Allow-Origin']='*'; return r
 
-# ── PRICE CACHE ───────────────────────────────────────────────────────
-_prices    = {}
-_prev      = {}
-_price_lock= threading.Lock()
-_cache_ts  = 0
+def now_et(): return datetime.now(ET_TZ)
+def now_str(): return now_et().strftime('%H:%M ET')
+def today_str(): return now_et().strftime('%Y-%m-%d')
+def is_market_open():
+    n=now_et(); t=n.hour*60+n.minute
+    return n.weekday()<5 and 570<=t<960
+def is_trading_day(): return now_et().weekday()<5
 
-def get_rt_prices(syms):
-    out = {}
-    if alpaca_data and syms:
-        try:
-            req    = StockLatestTradeRequest(symbol_or_symbols=list(syms))
-            trades = alpaca_data.get_stock_latest_trade(req)
-            for sym, t in trades.items():
-                p = float(t.price); prev = _prev.get(sym, p)
-                pct = ((p-prev)/prev*100) if prev else 0
-                out[sym] = {'symbol':sym,'price':round(p,2),'pct':round(pct,3),
-                            'source':'alpaca','time':datetime.now(ET_TZ).strftime('%H:%M:%S')}
-            return out
-        except Exception as e:
-            print(f"  Alpaca rt: {e}")
-    try:
-        df = yf.download(list(syms), period='2d', interval='1d', auto_adjust=True, progress=False)
-        multi = isinstance(df.columns, pd.MultiIndex)
-        for sym in syms:
-            try:
-                cl = (df['Close'][sym] if multi else df['Close']).dropna()
-                if not len(cl): continue
-                p=float(cl.iloc[-1]); prev=float(cl.iloc[-2]) if len(cl)>=2 else p
-                pct=((p-prev)/prev*100) if prev else 0
-                out[sym]={'symbol':sym,'price':round(p,2),'pct':round(pct,3),
-                          'source':'yfinance','time':datetime.now(ET_TZ).strftime('%H:%M:%S')}
-            except: pass
-    except: pass
-    return out
-
-def price_thread():
-    global _cache_ts
-    while True:
-        try:
-            syms = list(set(UNIVERSE+['SPY','QQQ','BTC-USD']) |
-                        {t['symbol'] for t in state['active_trades'].values()} |
-                        set(state['day_picks']) | set(state['custom_watchlist']))
-            syms = [s for s in syms if s != 'BTC-USD']
-            result = get_rt_prices(syms)
-            with _price_lock:
-                _prices.update(result); _cache_ts = time.time()
-        except Exception as e:
-            print(f"  Price thread: {e}")
-        time.sleep(3 if alpaca_data else 30)
-
-def cp(sym):
-    with _price_lock: return _prices.get(sym)
-def all_prices():
-    with _price_lock: return dict(_prices)
-
-def load_prev_closes():
-    syms = UNIVERSE[:20]
-    try:
-        df = yf.download(syms, period='5d', interval='1d', auto_adjust=True, progress=False)
-        multi = isinstance(df.columns, pd.MultiIndex)
-        for sym in syms:
-            try:
-                cl = (df['Close'][sym] if multi else df['Close']).dropna()
-                if len(cl)>=2: _prev[sym]=float(cl.iloc[-2])
-            except: pass
-    except: pass
-
-# ── TELEGRAM ──────────────────────────────────────────────────────────
 def tg(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT: return False
     try:
-        body = json.dumps({'chat_id':str(TELEGRAM_CHAT).strip(),'text':str(msg),
-                           'disable_web_page_preview':True}).encode()
-        req  = urllib.request.Request(
+        body=json.dumps({'chat_id':str(TELEGRAM_CHAT).strip(),'text':str(msg)[:4000],
+                         'disable_web_page_preview':True}).encode()
+        req=urllib.request.Request(
             f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
-            data=body, headers={'Content-Type':'application/json','User-Agent':UA})
-        with urllib.request.urlopen(req, timeout=12) as r:
+            data=body,headers={'Content-Type':'application/json','User-Agent':UA})
+        with urllib.request.urlopen(req,timeout=12) as r:
             return json.loads(r.read()).get('ok',False)
-    except Exception as e:
-        print(f"  Telegram: {e}"); return False
+    except: return False
 
-# ── HELPERS ───────────────────────────────────────────────────────────
-def is_market_open():
-    n=datetime.now(ET_TZ); t=n.hour*60+n.minute
-    return n.weekday()<5 and 570<=t<960
-def is_trading_day(): return datetime.now(ET_TZ).weekday()<5
-def now_et(): return datetime.now(ET_TZ).strftime('%H:%M ET')
-def today_str(): return datetime.now(ET_TZ).strftime('%Y-%m-%d')
+def http_get(url, timeout=10):
+    req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'application/json'})
+    with urllib.request.urlopen(req,timeout=timeout) as r: return r.read()
 
-# ── SCORING ───────────────────────────────────────────────────────────
-def score_stock(q, spy_pct=0, qqq_pct=0):
-    p   = q.get('regularMarketPrice',0)
-    chg = q.get('regularMarketChangePercent',0)
-    vr  = q.get('_vr',0)
-    pre = q.get('preMarketChangePercent',0)
-    hi52= q.get('fiftyTwoWeekHigh',p) or p
-    lo52= q.get('fiftyTwoWeekLow',p*0.3) or p*0.3
-    if p < 1: return 0
-    score = 0
-    mkt = (spy_pct+qqq_pct)/2
-    annual = ((hi52-lo52)/lo52*100) if lo52>0 else 0
-    if   annual>400: score+=25
-    elif annual>250: score+=21
-    elif annual>150: score+=16
-    elif annual>100: score+=11
-    elif annual>60:  score+=6
-    elif annual<30:  score-=15
-    if   chg>12: score+=25
-    elif chg>8:  score+=21
-    elif chg>5:  score+=16
-    elif chg>3:  score+=11
-    elif chg>1:  score+=6
-    elif chg>0:  score+=2
-    elif chg<-5: score-=20
-    elif chg<-2: score-=10
-    elif chg<0:  score-=3
-    if   vr>8:  score+=20
-    elif vr>5:  score+=17
-    elif vr>3:  score+=13
-    elif vr>2:  score+=8
-    elif vr>1.5:score+=4
-    elif vr>1:  score+=1
-    else:        score-=12
-    if   pre>8:  score+=15
-    elif pre>5:  score+=13
-    elif pre>3:  score+=10
-    elif pre>1:  score+=6
-    elif pre>0:  score+=2
-    elif pre<-2: score-=8
-    if   mkt>1.5: score+=10
-    elif mkt>0.5: score+=7
-    elif mkt>0:   score+=3
-    elif mkt<-1:  score-=15
-    elif mkt<-0.3:score-=5
-    return min(99, max(0, round(score)))
+def ai_call(system_p, user_p, max_tokens=500):
+    if GROQ_KEY:
+        try:
+            payload=json.dumps({"model":"llama-3.3-70b-versatile","max_tokens":max_tokens,
+                "messages":[{"role":"system","content":system_p},{"role":"user","content":user_p}]}).encode()
+            req=urllib.request.Request("https://api.groq.com/openai/v1/chat/completions",
+                data=payload,headers={"Authorization":f"Bearer {GROQ_KEY}",
+                "Content-Type":"application/json","User-Agent":UA})
+            with urllib.request.urlopen(req,timeout=20) as r:
+                return json.loads(r.read())['choices'][0]['message']['content'],'groq'
+        except Exception as e: print(f"Groq: {e}")
+    if ANTHROPIC_KEY:
+        try:
+            payload=json.dumps({"model":"claude-sonnet-4-6","max_tokens":max_tokens,
+                "system":system_p,"messages":[{"role":"user","content":user_p}]}).encode()
+            req=urllib.request.Request("https://api.anthropic.com/v1/messages",data=payload,
+                headers={"x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01",
+                "content-type":"application/json","User-Agent":UA})
+            with urllib.request.urlopen(req,timeout=25) as r:
+                return json.loads(r.read())['content'][0]['text'],'anthropic'
+        except Exception as e: print(f"Anthropic: {e}")
+    return None,'none'
 
-def get_full_quotes(symbols):
-    results = []
+# ══════════════════════════════════════════════════════════════════════
+# ── WHALE DATA SOURCES ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+# Cache
+_whale_cache = {'sec4':[],'congress':[],'unusual':[],'ts':0}
+_whale_lock  = threading.Lock()
+
+def fetch_sec_form4():
+    """SEC EDGAR Form 4 insider trades — real-time, free"""
+    items = []
     try:
-        batch = list(dict.fromkeys([s for s in symbols if s]))
-        df5   = yf.download(batch, period='5d', interval='1d', auto_adjust=True, progress=False)
-        df1y  = yf.download(batch, period='1y', interval='1d', auto_adjust=True, progress=False)
-        def fi(s):
-            try: return s, yf.Ticker(s).info or {}
-            except: return s, {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-            info_map = dict(ex.map(fi, batch))
-        multi = isinstance(df5.columns, pd.MultiIndex)
-        for sym in batch:
+        # Recent Form 4 filings RSS
+        url = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&dateb=&owner=include&count=40&search_text=&output=atom'
+        data = http_get(url, timeout=12).decode('utf-8','replace')
+        tree = ET.fromstring(data)
+        ns = {'atom':'http://www.w3.org/2005/Atom'}
+        for entry in tree.findall('atom:entry', ns)[:20]:
+            title_el = entry.find('atom:title', ns)
+            link_el  = entry.find('atom:link', ns)
+            upd_el   = entry.find('atom:updated', ns)
+            if title_el is None: continue
+            title = title_el.text or ''
+            link  = link_el.get('href','') if link_el is not None else ''
+            upd   = (upd_el.text or '')[:10] if upd_el is not None else ''
+            # Extract ticker from title "4 - CompanyName (TICKER) (insiderName)"
+            m = re.search(r'\(([A-Z]{1,5})\)',title)
+            sym = m.group(1) if m else ''
+            if not sym or len(sym)>5: continue
+            # Skip ETFs and indices
+            if sym in ('SEC','FDA','IPO','LLC','INC','CORP'): continue
+            items.append({'symbol':sym,'source':'SEC Form 4','title':title,
+                         'link':link,'date':upd,'type':'insider','direction':'buy',
+                         'confidence':75,'hold_days':90})
+    except Exception as e:
+        print(f"SEC Form4: {e}")
+    return items[:15]
+
+def fetch_congress_trades():
+    """Congress stock trades — housestockwatcher.com free API"""
+    items = []
+    try:
+        data = http_get('https://house-stock-watcher-data.s3-us-gov-west-1.amazonaws.com/data/all_transactions.json', timeout=15)
+        trades = json.loads(data)
+        # Last 30 days, purchases only
+        cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        purchases = [t for t in trades
+                     if t.get('type','').lower() in ('purchase','buy')
+                     and t.get('transaction_date','') >= cutoff
+                     and t.get('ticker') and len(t.get('ticker',''))<=5
+                     and t.get('ticker') not in ('N/A','--','','UNKNOWN')]
+        # Sort by date desc
+        purchases.sort(key=lambda x: x.get('transaction_date',''), reverse=True)
+        seen = set()
+        for t in purchases[:40]:
+            sym = t.get('ticker','').upper().strip()
+            if not sym or sym in seen: continue
+            seen.add(sym)
+            amt = t.get('amount','')
+            rep = t.get('representative','Unknown')
+            items.append({
+                'symbol':sym,'source':'Congress Trade','direction':'buy',
+                'title':f"{rep} bought {sym} ({amt})",
+                'date':t.get('transaction_date',''),'type':'congress',
+                'confidence':82,'hold_days':180,
+                'rep':rep,'amount':amt,
+                'party':t.get('party','')
+            })
+    except Exception as e:
+        print(f"Congress: {e}")
+    # Fallback — Senate
+    if not items:
+        try:
+            data = http_get('https://efts.sec.gov/LATEST/search-index?q=%22congress%22&dateRange=custom&startdt=2025-01-01&forms=4', timeout=10)
+        except: pass
+    return items[:20]
+
+def fetch_unusual_whales():
+    """Unusual Whales public feed — free tier"""
+    items = []
+    try:
+        # Public flow feed
+        data = http_get('https://unusualwhales.com/api/option_activity?limit=30&is_bullish=true', timeout=10)
+        flow = json.loads(data)
+        for f in (flow.get('data') or [])[:20]:
+            sym = f.get('ticker','').upper()
+            if not sym or len(sym)>5: continue
+            items.append({
+                'symbol':sym,'source':'Unusual Whales','direction':'buy',
+                'title':f"Unusual call activity {sym} ${f.get('premium',0):,.0f}",
+                'date':today_str(),'type':'options_flow','confidence':70,'hold_days':30,
+                'premium':f.get('premium',0),'strike':f.get('strike_price',0),
+                'expiry':f.get('expires','')
+            })
+    except Exception as e:
+        print(f"UnusualWhales: {e}")
+    # Fallback: parse public RSS
+    if not items:
+        try:
+            data = http_get('https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,NVDA,TSLA,AAPL&region=US&lang=en-US', timeout=8).decode('utf-8','replace')
+            tree = ET.fromstring(data)
+            syms_seen = set()
+            for item in tree.iter('item'):
+                t = item.find('title')
+                if t is None or not t.text: continue
+                for m in re.finditer(r'\b([A-Z]{2,5})\b', t.text):
+                    sym = m.group(1)
+                    if sym in ('CEO','CFO','IPO','FDA','SEC','THE','AND','FOR','BUY','INC'): continue
+                    if sym not in syms_seen and len(sym)<=5:
+                        syms_seen.add(sym)
+                        items.append({'symbol':sym,'source':'Options News','direction':'buy',
+                                     'title':t.text.strip()[:80],'date':today_str(),
+                                     'type':'news_flow','confidence':55,'hold_days':14})
+                    if len(items)>=10: break
+                if len(items)>=10: break
+        except: pass
+    return items[:15]
+
+def refresh_whale_data():
+    """Pull all 3 whale sources in parallel, deduplicate, score"""
+    global _whale_cache
+    with _whale_lock:
+        if time.time() - _whale_cache['ts'] < 900: return  # 15min cache
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            f4   = ex.submit(fetch_sec_form4)
+            cong = ex.submit(fetch_congress_trades)
+            uw   = ex.submit(fetch_unusual_whales)
+            sec4_res  = f4.result(timeout=20)
+            cong_res  = cong.result(timeout=20)
+            uw_res    = uw.result(timeout=15)
+    except Exception as e:
+        print(f"Whale fetch: {e}")
+        sec4_res=cong_res=uw_res=[]
+
+    # Deduplicate by symbol — count how many sources agree
+    sym_map = {}
+    for item in sec4_res + cong_res + uw_res:
+        sym = item['symbol']
+        if sym not in sym_map:
+            sym_map[sym] = {'symbol':sym,'sources':[],'items':[],'confidence':0,'hold_days':0}
+        sym_map[sym]['sources'].append(item['source'])
+        sym_map[sym]['items'].append(item)
+        sym_map[sym]['confidence'] = max(sym_map[sym]['confidence'], item['confidence'])
+        sym_map[sym]['hold_days']  = max(sym_map[sym]['hold_days'],  item['hold_days'])
+
+    # Boost confidence if multiple sources agree
+    for sym, data in sym_map.items():
+        n = len(set(data['sources']))
+        if n >= 3: data['confidence'] = min(99, data['confidence'] + 15)
+        elif n >= 2: data['confidence'] = min(99, data['confidence'] + 8)
+        data['multi_source'] = n >= 2
+        data['source_count'] = n
+
+    whales = sorted(sym_map.values(), key=lambda x: x['confidence'], reverse=True)
+
+    with _whale_lock:
+        _whale_cache = {'sec4':sec4_res,'congress':cong_res,'unusual':uw_res,
+                        'combined':whales,'ts':time.time()}
+    print(f"  Whale data: {len(sec4_res)} SEC4, {len(cong_res)} Congress, {len(uw_res)} Unusual = {len(whales)} symbols")
+
+def get_whale_data():
+    if not _whale_cache.get('ts') or time.time()-_whale_cache['ts']>3600:
+        threading.Thread(target=refresh_whale_data, daemon=True).start()
+    return _whale_cache
+
+# ══════════════════════════════════════════════════════════════════════
+# ── PRICE + TECHNICAL ENGINE ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+_price_cache = {}
+_price_ts    = 0
+_price_lock  = threading.Lock()
+
+def price_thread():
+    global _price_ts
+    base_syms = ['SPY','QQQ','VIX','NVDA','TSLA','AAPL','MSFT','AMZN','META','GOOGL',
+                 'SOXL','TQQQ','MSTR','COIN','AMD','PLTR','MU','SMCI']
+    while True:
+        try:
+            whale = list({w['symbol'] for w in _whale_cache.get('combined',[])})[:20]
+            trade_syms = list({t['symbol'] for t in state['trades'].values()})
+            syms = list(dict.fromkeys(base_syms + whale + trade_syms))
+            result = {}
+            if alpaca_data:
+                try:
+                    req = StockLatestTradeRequest(symbol_or_symbols=syms)
+                    trades = alpaca_data.get_stock_latest_trade(req)
+                    with _price_lock:
+                        for sym, t in trades.items():
+                            p = float(t.price)
+                            old = _price_cache.get(sym,{}).get('price',p)
+                            pct = ((p-old)/old*100) if old else 0
+                            result[sym]={'price':p,'pct':pct,'ts':time.time(),'src':'live'}
+                        _price_cache.update(result); _price_ts=time.time()
+                    time.sleep(2); continue
+                except: pass
+            # yfinance fallback
             try:
-                c5  = (df5['Close'][sym] if multi else df5['Close']).dropna()
-                v5  = (df5['Volume'][sym] if multi else df5['Volume']).dropna()
-                c1y = (df1y['Close'][sym] if multi else df1y['Close']).dropna()
-                v1y = (df1y['Volume'][sym] if multi else df1y['Volume']).dropna()
-                if not len(c5): continue
-                price=float(c5.iloc[-1]); prev=float(c5.iloc[-2]) if len(c5)>=2 else price
-                chg=((price-prev)/prev*100) if prev else 0
-                info=info_map.get(sym,{}); avg=int(v1y.mean()) if len(v1y) else 1
-                vr=round(int(v5.iloc[-1])/avg,1) if avg and len(v5) else 0
-                pre_p=float(info.get('preMarketPrice') or 0)
-                pre_chg=((pre_p-price)/price*100) if pre_p and price else 0
-                hi52=round(float(c1y.max()),2) if len(c1y) else price
-                lo52=round(float(c1y.min()),2) if len(c1y) else price
-                results.append({'symbol':sym,'shortName':info.get('shortName',sym),
-                    'regularMarketPrice':round(price,2),
-                    'regularMarketChangePercent':round(chg,4),
-                    'marketCap':int(info.get('marketCap') or 0),
-                    'fiftyTwoWeekHigh':hi52,'fiftyTwoWeekLow':lo52,
-                    'preMarketChangePercent':round(pre_chg,2),
-                    'preMarketPrice':round(pre_p,2),'_vr':vr})
+                df = yf.download(syms[:30],period='2d',interval='1d',auto_adjust=True,progress=False)
+                multi = isinstance(df.columns,pd.MultiIndex)
+                with _price_lock:
+                    for sym in syms:
+                        try:
+                            cl=(df['Close'][sym] if multi else df['Close']).dropna()
+                            if len(cl)<1: continue
+                            p=float(cl.iloc[-1]); prev=float(cl.iloc[-2]) if len(cl)>=2 else p
+                            _price_cache[sym]={'price':round(p,2),'pct':round((p-prev)/prev*100,3),'ts':time.time(),'src':'delayed'}
+                        except: pass
+                _price_ts=time.time()
             except: pass
-    except Exception as e:
-        print(f"  Quotes: {e}")
-    return results
+        except Exception as e: print(f"Price thread: {e}")
+        time.sleep(30)
 
-def fetch_intraday_bars(symbol):
+def cp(sym):
+    with _price_lock: return _price_cache.get(sym)
+
+def all_prices():
+    with _price_lock: return dict(_price_cache)
+
+def get_candles(sym, period='1d', interval='5m'):
     try:
-        df = yf.download(symbol, period='1d', interval='5m', auto_adjust=True, progress=False)
-        if df.empty:
-            df = yf.download(symbol, period='5d', interval='15m', auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        df = yf.download(sym, period=period, interval=interval, auto_adjust=True, progress=False)
+        if df.empty and interval=='5m':
+            df = yf.download(sym, period='5d', interval='15m', auto_adjust=True, progress=False)
+        if isinstance(df.columns, pd.MultiIndex): df.columns=df.columns.get_level_values(0)
         return df.dropna()
     except: return pd.DataFrame()
 
-def compute_vwap_ema(symbol):
-    df = fetch_intraday_bars(symbol)
-    if df.empty or len(df)<6: return None
-    typical=(df['High']+df['Low']+df['Close'])/3
-    cum_vol=df['Volume'].cumsum().replace(0,1)
-    vwap=(typical*df['Volume']).cumsum()/cum_vol
-    ema9=df['Close'].ewm(span=9,adjust=False).mean()
-    ema20=df['Close'].ewm(span=20,adjust=False).mean()
-    ema50=df['Close'].ewm(span=50,adjust=False).mean()
-    rsi_delta=df['Close'].diff()
-    gain=rsi_delta.clip(lower=0).rolling(14).mean()
-    loss=(-rsi_delta.clip(upper=0)).rolling(14).mean()
-    rs=gain/loss.replace(0,1e-9)
-    rsi=100-100/(1+rs)
-    last=float(df['Close'].iloc[-1])
-    lv=float(vwap.iloc[-1]); le9=float(ema9.iloc[-1]); le20=float(ema20.iloc[-1])
-    le50=float(ema50.iloc[-1]); lr=float(rsi.iloc[-1])
-    rising=last>float(df['Close'].iloc[-3]) if len(df)>=3 else False
-    above_vwap=last>lv; bull_ema=le9>le20
-    if above_vwap and bull_ema and rising:
-        signal,color='BUY','green'
-        reason=f"Above VWAP ${lv:.2f}, 9EMA>20EMA, price rising"
-    elif not above_vwap and not bull_ema:
-        signal,color='SELL','red'
-        reason=f"Below VWAP ${lv:.2f}, 9EMA<20EMA — bearish"
+def compute_technicals(sym, df=None):
+    """Full technical suite: VWAP, EMA, RSI, MACD, BB, ATR, support/resistance"""
+    if df is None: df = get_candles(sym)
+    if df.empty or len(df)<10:
+        df = get_candles(sym,'5d','15m')
+    if df.empty or len(df)<5: return None
+    c=df['Close']; h=df['High']; l=df['Low']; v=df['Volume']
+    # VWAP
+    typical=(h+l+c)/3; cum_vol=v.cumsum().replace(0,1)
+    vwap=(typical*v).cumsum()/cum_vol
+    # EMAs
+    ema9=c.ewm(span=9,adjust=False).mean()
+    ema20=c.ewm(span=20,adjust=False).mean()
+    ema50=c.ewm(span=50,adjust=False).mean()
+    ema200=c.ewm(span=200,adjust=False).mean()
+    # RSI
+    delta=c.diff(); gain=delta.clip(lower=0).rolling(14).mean()
+    loss=(-delta.clip(upper=0)).rolling(14).mean()
+    rs=gain/loss.replace(0,1e-9); rsi=100-100/(1+rs)
+    # MACD
+    ema12=c.ewm(span=12,adjust=False).mean(); ema26=c.ewm(span=26,adjust=False).mean()
+    macd=ema12-ema26; signal=macd.ewm(span=9,adjust=False).mean(); hist=macd-signal
+    # Bollinger Bands
+    sma20=c.rolling(20).mean(); std20=c.rolling(20).std()
+    bb_upper=sma20+2*std20; bb_lower=sma20-2*std20
+    # ATR
+    tr=pd.concat([h-l,(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1)
+    atr=tr.rolling(14).mean()
+    # Support/Resistance from recent pivots
+    recent=df.tail(40)
+    support=float(recent['Low'].quantile(.15))
+    resistance=float(recent['High'].quantile(.85))
+    # Last values
+    last=float(c.iloc[-1]); lvwap=float(vwap.iloc[-1])
+    le9=float(ema9.iloc[-1]); le20=float(ema20.iloc[-1])
+    le50=float(ema50.iloc[-1]); le200=float(ema200.iloc[-1])
+    lr=float(rsi.iloc[-1]); lm=float(macd.iloc[-1])
+    ls=float(signal.iloc[-1]); lh=float(hist.iloc[-1])
+    latr=float(atr.iloc[-1])
+    lbb_u=float(bb_upper.iloc[-1]); lbb_l=float(bb_lower.iloc[-1])
+    lbb_mid=float(sma20.iloc[-1])
+    # Signals
+    above_vwap=last>lvwap; bull_ema=le9>le20
+    macd_bull=lh>0 and lm>ls
+    rsi_ok=30<lr<70; rsi_os=lr<35; rsi_ob=lr>70
+    near_support=last<support*1.03
+    near_resistance=last>resistance*.97
+    # Composite signal
+    bull_pts=(1 if above_vwap else 0)+(1 if bull_ema else 0)+(1 if macd_bull else 0)+(1 if rsi_ok else 0)
+    if bull_pts>=3 and not rsi_ob: sig,sig_col='BUY','green'
+    elif bull_pts<=1 or rsi_ob: sig,sig_col='SELL','red'
+    else: sig,sig_col='WAIT','amber'
+    sig_reason=(f"{'Above' if above_vwap else 'Below'} VWAP ${lvwap:.2f} | "
+                f"RSI {lr:.0f} | MACD {'▲' if macd_bull else '▼'} | "
+                f"EMA9 {'>' if bull_ema else '<'} EMA20")
+    # ATR-based levels
+    entry=last
+    stop_day=round(max(entry-1.5*latr, support*.995),2)
+    target_day=round(min(entry+2.5*latr, resistance),2)
+    stop_swing=round(max(entry-2.5*latr, le50*.97),2)
+    target_swing=round(min(entry+4.0*latr, resistance*1.05),2)
+    stop_lt=round(entry*0.88,2)
+    target_lt=round(entry*1.35,2)
+    # Prediction: simple linear regression on close
+    x=np.arange(len(c)); coeffs=np.polyfit(x,c.values,1)
+    slope=coeffs[0]; pred_5d=round(float(np.polyval(coeffs,len(c)+1)),2)
+    pred_30d=round(float(np.polyval(coeffs,len(c)+6)),2)
+    pred_90d=round(float(np.polyval(coeffs,len(c)+18)),2)
+    trend='bullish' if slope>0 else 'bearish'
+    # Best mode
+    daily_vol=float(c.pct_change().std()*100) if len(c)>5 else 2.0
+    if daily_vol>4: best_mode='day'
+    elif daily_vol>1.5: best_mode='swing'
+    else: best_mode='longterm'
+    return {
+        'signal':sig,'signal_color':sig_col,'signal_reason':sig_reason,
+        'price':round(last,2),'vwap':round(lvwap,2),'above_vwap':above_vwap,
+        'ema9':round(le9,2),'ema20':round(le20,2),'ema50':round(le50,2),'ema200':round(le200,2),
+        'rsi':round(lr,1),'rsi_oversold':rsi_os,'rsi_overbought':rsi_ob,
+        'macd':round(lm,4),'macd_signal':round(ls,4),'macd_hist':round(lh,4),'macd_bull':macd_bull,
+        'bb_upper':round(lbb_u,2),'bb_lower':round(lbb_l,2),'bb_mid':round(lbb_mid,2),
+        'atr':round(latr,3),'support':round(support,2),'resistance':round(resistance,2),
+        'near_support':near_support,'near_resistance':near_resistance,
+        'stop_day':stop_day,'target_day':target_day,
+        'stop_swing':stop_swing,'target_swing':target_swing,
+        'stop_lt':stop_lt,'target_lt':target_lt,
+        'pred_5d':pred_5d,'pred_30d':pred_30d,'pred_90d':pred_90d,'trend':trend,
+        'best_mode':best_mode,'daily_vol':round(daily_vol,2),
+        'vwap_series':vwap.tolist()[-80:],'ema9_series':ema9.tolist()[-80:],
+        'ema20_series':ema20.tolist()[-80:],'ema50_series':ema50.tolist()[-80:],
+        'bb_upper_series':bb_upper.tolist()[-80:],'bb_lower_series':bb_lower.tolist()[-80:],
+        'close_series':c.tolist()[-80:],'times':[str(i)[-8:-3] if ' ' in str(i) else str(i)[-5:] for i in df.index[-80:]],
+        'slope':round(float(slope),4),'pred_series':[round(float(np.polyval(coeffs,xi)),2) for xi in range(max(0,len(c)-80),len(c)+20)],
+        'bull_ema':bull_ema,'bull_pts':bull_pts
+    }
+
+def whale_score_and_recommend(sym, tech, whale_item=None):
+    """Compute overall whale conviction score and trade recommendation"""
+    score = 0
+    reasons = []
+    # Technical
+    if tech:
+        bp=tech.get('bull_pts',0)
+        score += bp*8
+        if tech.get('rsi_oversold'): score+=10; reasons.append('RSI oversold — bounce likely')
+        if tech.get('near_support'):  score+=8;  reasons.append('Near key support')
+        if tech.get('macd_bull'):     score+=7;  reasons.append('MACD bullish crossover')
+        if tech.get('above_vwap'):    score+=6;  reasons.append('Trading above VWAP')
+        if tech.get('trend')=='bullish': score+=5
+    # Whale source bonus
+    if whale_item:
+        score += whale_item.get('confidence',0)//4
+        n=whale_item.get('source_count',1)
+        if n>=2: score+=15; reasons.append(f"{n} whale sources agree")
+        if whale_item.get('items'):
+            for it in whale_item['items']:
+                if it.get('type')=='congress': reasons.append(f"Congress: {it.get('rep','member')} buying")
+                elif it.get('type')=='insider': reasons.append('SEC Form 4 insider buy')
+                elif it.get('type')=='options_flow': reasons.append('Unusual options activity')
+    score = min(99, max(0, score))
+    # Mode recommendation
+    if tech:
+        mode=tech.get('best_mode','swing')
+        vol=tech.get('daily_vol',2)
     else:
-        signal,color='WAIT','amber'
-        reason=f"{'Above' if above_vwap else 'Below'} VWAP, mixed EMAs — wait for clarity"
-    return {'signal':signal,'color':color,'reason':reason,'price':round(last,2),
-            'vwap':round(lv,2),'ema9':round(le9,2),'ema20':round(le20,2),
-            'ema50':round(le50,2),'rsi':round(lr,1),
-            'above_vwap':above_vwap,'bull_ema':bull_ema,
-            'vwap_series':[round(float(v),2) for v in vwap.tolist()],
-            'ema9_series':[round(float(v),2) for v in ema9.tolist()],
-            'ema20_series':[round(float(v),2) for v in ema20.tolist()]}
-
-def compute_atr_levels(symbol, entry_price):
-    try:
-        df=fetch_intraday_bars(symbol)
-        if df.empty or len(df)<10: raise ValueError
-        high=df['High'].values; low=df['Low'].values; close=df['Close'].values
-        tr=[max(high[i]-low[i],abs(high[i]-close[i-1]),abs(low[i]-close[i-1])) for i in range(1,len(close))]
-        atr=sum(tr[-14:])/min(14,len(tr))
-        support=float(min(low[-20:])); resistance=float(max(high[-20:]))
-        stop=round(max(entry_price-1.5*atr, support*0.995),2)
-        target=round(max(entry_price+2.0*atr, resistance),2)
-        stop=max(stop,round(entry_price*0.92,2))
-        target=min(target,round(entry_price*1.20,2))
-        return {'stop':stop,'target':target,'atr':round(atr,3),
-                'stop_pct':round((entry_price-stop)/entry_price*100,1),
-                'target_pct':round((target-entry_price)/entry_price*100,1),
-                'support':round(support,2),'resistance':round(resistance,2)}
-    except:
-        return {'stop':round(entry_price*0.94,2),'target':round(entry_price*1.10,2),
-                'atr':None,'stop_pct':6.0,'target_pct':10.0,
-                'support':round(entry_price*0.94,2),'resistance':round(entry_price*1.10,2)}
-
-# ── AI BRAIN (Groq first, Anthropic fallback) ─────────────────────────
-def ai_call(system_prompt, user_msg, max_tokens=400):
-    """Try Groq first (free), fall back to Anthropic if available."""
-    # ── Groq (free) ──────────────────────────────────────────────────
-    if GROQ_KEY:
-        try:
-            payload = json.dumps({
-                "model": "llama-3.3-70b-versatile",
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role":"system","content":system_prompt},
-                    {"role":"user","content":user_msg}
-                ]
-            }).encode()
-            req = urllib.request.Request(
-                "https://api.groq.com/openai/v1/chat/completions",
-                data=payload,
-                headers={"Authorization":f"Bearer {GROQ_KEY}",
-                         "Content-Type":"application/json","User-Agent":UA})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                return json.loads(r.read())['choices'][0]['message']['content'], 'groq'
-        except Exception as e:
-            print(f"  Groq: {e}")
-    # ── Anthropic fallback ────────────────────────────────────────────
-    if ANTHROPIC_KEY:
-        try:
-            payload = json.dumps({
-                "model":"claude-sonnet-4-6",
-                "max_tokens":max_tokens,
-                "system":system_prompt,
-                "messages":[{"role":"user","content":user_msg}]
-            }).encode()
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages", data=payload,
-                headers={"x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01",
-                         "content-type":"application/json","User-Agent":UA})
-            with urllib.request.urlopen(req, timeout=25) as r:
-                return json.loads(r.read())['content'][0]['text'], 'anthropic'
-        except Exception as e:
-            print(f"  Anthropic: {e}")
-    return None, None
-
-# ── NEWS ──────────────────────────────────────────────────────────────
-_news_cache={'items':[],'ts':0}
-def get_news(symbols=None):
-    if time.time()-_news_cache['ts']<90 and _news_cache['items']:
-        return _news_cache['items']
-    items=[]
-    syms_str=','.join((symbols or ['QQQ','SPY','NVDA','TSLA','SOXL'])[:6])
-    try:
-        url=f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={syms_str}&region=US&lang=en-US'
-        req=urllib.request.Request(url,headers={'User-Agent':UA})
-        with urllib.request.urlopen(req,timeout=6) as r:
-            tree=ET.fromstring(r.read())
-            for item in tree.iter('item'):
-                t=item.find('title')
-                if t is not None and t.text and len(t.text.strip())>15:
-                    pub=item.find('pubDate')
-                    items.append({'title':t.text.strip(),'pub':pub.text if pub is not None else ''})
-    except: pass
-    if not items: items=[{'title':'Market data loading','pub':''}]
-    _news_cache.update({'items':items[:15],'ts':time.time()})
-    return _news_cache['items']
-
-def get_symbol_news(symbol):
-    items=[]
-    try:
-        url=f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US'
-        req=urllib.request.Request(url,headers={'User-Agent':UA})
-        with urllib.request.urlopen(req,timeout=6) as r:
-            tree=ET.fromstring(r.read())
-            for item in list(tree.iter('item'))[:5]:
-                t=item.find('title')
-                if t is not None and t.text:
-                    items.append(t.text.strip())
-    except: pass
-    return items
+        mode='swing'; vol=2
+    hold_days=whale_item.get('hold_days',30) if whale_item else 30
+    if hold_days>=90: rec_mode='longterm'
+    elif hold_days>=14: rec_mode='swing'
+    else: rec_mode='day'
+    if vol>5: rec_mode='day'
+    return {'score':score,'reasons':reasons[:5],'rec_mode':rec_mode,'hold_days':hold_days}
 
 # ══════════════════════════════════════════════════════════════════════
-# ── SHARED STATE ─────────────────────────────────────────────────────
-# All 3 tabs read/write this single state object
+# ── TRADE ENGINE ──────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════
+
 state = {
-    # Tab 1: Day trade picks (up to 5)
-    'day_picks': [],           # list of symbols (auto + manual)
-    'pick_details': {},        # sym -> {score, signal, levels, last_updated}
-    'active_trades': {},       # sym -> trade dict
-    'completed_trades': [],    # all closed trades today
-    'capital': 10000.0,
-    'starting_capital': 10000.0,
-    'total_pnl': 0.0,
-    'date': None,
-
-    # Tab 2: Options candidates (top 5)
-    'option_candidates': [],   # [{sym, strategy, score, entry, pnl_pct, status}]
-    'option_history': [],
-
-    # Tab 3: Custom research
-    'custom_watchlist': [],    # user-typed tickers for deep research
-    'custom_research': {},     # sym -> {analysis, signal, entry_zone, last_updated}
-    'custom_trades': {},       # sym -> active custom trade
-
-    # Shared
-    'log': [],
-    'last_scan': 0,
+    'trades':{},         # id -> trade
+    'completed':[],
+    'capital':{'day':5000.0,'swing':10000.0,'longterm':15000.0},
+    'starting':{'day':5000.0,'swing':10000.0,'longterm':15000.0},
+    'pnl':{'day':0.0,'swing':0.0,'longterm':0.0},
+    'whale_cache':[],
+    'log':[],
+    'date':None,
+    'daily_report':None,
+    'ai_alerts':[],
 }
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),'atp_state.json')
+STATE_FILE='atp_v3_state.json'
 
 def save_state():
     try:
-        snap={k:v for k,v in state.items() if k not in ('pick_details','custom_research')}
-        snap['date']=state['date']
+        snap={k:v for k,v in state.items() if k not in ('whale_cache',)}
         with open(STATE_FILE,'w') as f: json.dump(snap,f)
-    except Exception as e: print(f"  save: {e}")
+    except Exception as e: print(f"Save: {e}")
 
 def load_state():
     if not os.path.exists(STATE_FILE): return
     try:
         with open(STATE_FILE) as f: snap=json.load(f)
         today=today_str()
-        state['custom_watchlist']=snap.get('custom_watchlist',[])
-        state['day_picks']=snap.get('day_picks',[])
         if snap.get('date')==today:
-            state.update({k:snap[k] for k in
-                ['active_trades','completed_trades','capital','starting_capital',
-                 'total_pnl','option_candidates','option_history','custom_trades'] if k in snap})
+            for k in ('trades','completed','capital','starting','pnl','log','ai_alerts'):
+                if k in snap: state[k]=snap[k]
             state['date']=today
-        add_log(f"Session resumed: {len(state['completed_trades'])} trades, P&L ${state['total_pnl']:+.2f}")
-    except Exception as e: print(f"  load: {e}")
+        else:
+            state['capital']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
+            state['starting']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
+        # Always restore completed for history
+        if 'completed' in snap: state['completed']=snap['completed'][-100:]
+    except Exception as e: print(f"Load: {e}")
 
-def add_log(msg):
-    ts=now_et()
-    state['log'].insert(0,{'time':ts,'msg':msg})
-    state['log']=state['log'][:60]
-    print(f"  [{ts}] {msg}")
-    tg(f"[AutoTrade Pro] {msg}")
+def add_log(msg, alert=False):
+    ts=now_str()
+    state['log'].insert(0,{'time':ts,'msg':msg,'alert':alert})
+    state['log']=state['log'][:100]
+    print(f"[{ts}] {msg}")
+    if alert:
+        state['ai_alerts'].insert(0,{'time':ts,'msg':msg})
+        state['ai_alerts']=state['ai_alerts'][:30]
+        tg(f"🚨 AutoTrade Pro\n{msg}")
+    elif msg.startswith(('ENTER','CLOSE','TARGET','STOP','EOD')):
+        tg(f"📊 {msg}")
 
-# ══════════════════════════════════════════════════════════════════════
-# ── TAB 1: DAY TRADE ENGINE ──────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-_scan_lock = threading.Lock()
+import uuid
 
-def run_morning_scan():
-    """Score the full universe, pick top 5, store with details."""
-    state['date'] = today_str()
-    add_log("🔍 Morning scan starting...")
-    try:
-        quotes = get_full_quotes(UNIVERSE)
-        spy=cp('SPY'); qqq=cp('QQQ')
-        sp=spy['pct'] if spy else 0; qp=qqq['pct'] if qqq else 0
-        for q in quotes:
-            q['_score'] = score_stock(q, sp, qp)
-        quotes.sort(key=lambda x: x['_score'], reverse=True)
-        top5 = [q['symbol'] for q in quotes[:5]]
-        state['day_picks'] = top5
-        state['last_scan'] = time.time()
-        # Compute signals for each pick
-        for q in quotes[:5]:
-            sym = q['symbol']
-            sig = compute_vwap_ema(sym)
-            lvl = compute_atr_levels(sym, q['regularMarketPrice'])
-            state['pick_details'][sym] = {
-                'quote': q, 'signal': sig, 'levels': lvl,
-                'score': q['_score'], 'last_updated': now_et()
-            }
-        mood="📈 BULL" if sp>0.3 and qp>0.3 else "📉 BEAR" if sp<-0.5 else "➡ MIXED"
-        add_log(f"✅ Scan done. Top picks: {', '.join(top5)}. Market: {mood}")
-        tg(f"🌅 AutoTrade Pro — {today_str()}\n{'━'*20}\n"
-           f"Top 5 Picks: {', '.join(top5)}\nSPY {sp:+.2f}% | QQQ {qp:+.2f}%\n{get_app_url()}")
-    except Exception as e:
-        add_log(f"❌ Scan error: {e}")
-
-def refresh_pick_signals():
-    """Update VWAP/EMA signals for all day picks every minute."""
-    for sym in state['day_picks']:
-        try:
-            cached = cp(sym)
-            if not cached: continue
-            price = cached['price']
-            sig   = compute_vwap_ema(sym)
-            lvl   = state['pick_details'].get(sym,{}).get('levels') or compute_atr_levels(sym, price)
-            if sym not in state['pick_details']:
-                state['pick_details'][sym] = {}
-            state['pick_details'][sym].update({'signal':sig,'levels':lvl,'last_updated':now_et()})
-
-            # Notify on fresh BUY signal if not already in a trade
-            if sig and sig['signal']=='BUY' and sym not in state['active_trades']:
-                key = f"notified_buy_{sym}_{today_str()}"
-                if not state.get(key):
-                    state[key] = True
-                    tg(f"🟢 BUY SIGNAL — {sym}\n{'━'*20}\n"
-                       f"${price:.2f} | Above VWAP ${sig['vwap']:.2f} | 9EMA>{sig['ema20']:.2f}\n"
-                       f"Target ${lvl['target']:.2f} (+{lvl['target_pct']:.1f}%) | Stop ${lvl['stop']:.2f} (-{lvl['stop_pct']:.1f}%)\n"
-                       f"{get_app_url()}")
-        except Exception as e:
-            print(f"  Signal refresh {sym}: {e}")
-
-def enter_day_trade(sym, manual=False):
-    if not is_market_open():
-        return False, "Market closed"
-    if sym in state['active_trades']:
-        return False, f"Already in {sym}"
+def enter_trade(sym, mode, manual=False, whale_data=None):
+    """Enter day/swing/long-term trade"""
+    if mode not in ('day','swing','longterm'):
+        return False,'Invalid mode'
+    # Check existing
+    for t in state['trades'].values():
+        if t['symbol']==sym and t['mode']==mode:
+            return False,f"Already in {sym} ({mode})"
+    # Price
     cached=cp(sym)
     if not cached:
-        # Try on-demand fetch
         try:
-            tk=yf.Ticker(sym); info=tk.fast_info
-            price=float(getattr(info,'last_price',0) or 0)
-            if price<=0: return False, "No price data"
-            cached={'price':price,'pct':0}
-        except: return False, "No price data"
+            tk=yf.Ticker(sym); fi=tk.fast_info
+            p=float(getattr(fi,'last_price',0) or 0)
+            if p>0: cached={'price':p,'pct':0}
+            else: return False,'No price'
+        except: return False,'No price'
     price=cached['price']
-    # Allocate capital per open slot (equal weight across 5 picks)
-    n_active=len(state['active_trades'])
-    if n_active>=5: return False, "Max 5 trades open"
-    alloc=state['capital']/(5-n_active) if state['capital']>0 else 0
-    if alloc<price: return False, f"Insufficient capital ${state['capital']:.2f}"
+    # Capital allocation
+    cap=state['capital'][mode]
+    n_open=sum(1 for t in state['trades'].values() if t['mode']==mode)
+    max_positions={'day':5,'swing':8,'longterm':12}
+    if n_open>=max_positions[mode]: return False,f"Max {max_positions[mode]} {mode} positions"
+    alloc_pct={'day':0.25,'swing':0.20,'longterm':0.15}
+    alloc=min(cap*alloc_pct[mode], cap/(max_positions[mode]-n_open+1))
+    if alloc<price: return False,f"Insufficient capital: ${cap:.0f}"
     shares=int(alloc/price)
-    if shares<1: return False, "Not enough capital for 1 share"
-    lvl=compute_atr_levels(sym, price)
+    if shares<1: return False,'Need at least 1 share'
+    # Get technicals for stops/targets
+    tech=compute_technicals(sym)
+    tid=str(uuid.uuid4())[:8]
+    stop_key={'day':'stop_day','swing':'stop_swing','longterm':'stop_lt'}[mode]
+    target_key={'day':'target_day','swing':'target_swing','longterm':'target_lt'}[mode]
+    stop=tech[stop_key] if tech and tech.get(stop_key) else round(price*(1-{'day':.06,'swing':.10,'longterm':.12}[mode]),2)
+    target=tech[target_key] if tech and tech.get(target_key) else round(price*(1+{'day':.10,'swing':.20,'longterm':.35}[mode]),2)
+    # Hold duration
+    hold_map={'day':1,'swing':14,'longterm':90}
+    hold_days=hold_map[mode]
+    if whale_data: hold_days=max(hold_days,whale_data.get('hold_days',hold_days))
     trade={
-        'symbol':sym,'entry':round(price,2),'shares':shares,'cost':round(shares*price,2),
-        'target':lvl['target'],'stop':lvl['stop'],'target_pct':lvl['target_pct'],
-        'stop_pct':lvl['stop_pct'],'atr':lvl.get('atr'),
+        'id':tid,'symbol':sym,'mode':mode,'entry':round(price,2),'shares':shares,
+        'cost':round(shares*price,2),'stop':stop,'target':target,
         'current':round(price,2),'peak':round(price,2),'peak_pnl_pct':0.0,
-        'entry_time':now_et(),'entered_at':time.time(),'manual':manual,'tab':'day'
+        'entry_time':now_str(),'entered_at':time.time(),'manual':manual,
+        'hold_days':hold_days,'exit_after':time.time()+hold_days*86400,
+        'whale_confidence':whale_data.get('confidence',0) if whale_data else 0,
+        'whale_sources':whale_data.get('sources',[]) if whale_data else [],
     }
-    state['active_trades'][sym]=trade
-    state['capital']-=trade['cost']
+    state['trades'][tid]=trade
+    state['capital'][mode]=round(cap-trade['cost'],2)
     save_state()
-    add_log(f"{'MANUAL' if manual else 'AUTO'} BUY {sym} {shares}sh @${price:.2f} T=${lvl['target']:.2f} S=${lvl['stop']:.2f}")
-    tg(f"📈 {'MANUAL ' if manual else ''}TRADE ENTERED — {sym}\n{'━'*20}\n"
-       f"{shares}sh @ ${price:.2f} | Cost ${shares*price:,.2f}\n"
-       f"Target ${lvl['target']:.2f} (+{lvl['target_pct']:.1f}%)\n"
-       f"Stop   ${lvl['stop']:.2f} (-{lvl['stop_pct']:.1f}%)\n{get_app_url()}")
-    # Execute on Alpaca
+    stop_pct=round((price-stop)/price*100,1)
+    tgt_pct=round((target-price)/price*100,1)
+    add_log(f"{'MANUAL' if manual else 'AUTO'} ENTER {sym} [{mode.upper()}] {shares}sh @${price:.2f} | T=${target:.2f}(+{tgt_pct}%) S=${stop:.2f}(-{stop_pct}%)", alert=True)
     if alpaca_trading:
-        try:
-            oid=str(alpaca_trading.submit_order(MarketOrderRequest(
-                symbol=sym,qty=shares,side=OrderSide.BUY,time_in_force=TimeInForce.DAY)).id)
-            state['active_trades'][sym]['order_id']=oid
-        except Exception as e: print(f"  Alpaca order: {e}")
-    return True, f"Entered {sym}"
+        try: alpaca_trading.submit_order(MarketOrderRequest(symbol=sym,qty=shares,side=OrderSide.BUY,time_in_force=TimeInForce.DAY))
+        except Exception as e: print(f"Alpaca enter: {e}")
+    return True,f"Entered {sym} [{mode}]"
 
-def close_day_trade(sym, reason='manual'):
-    t=state['active_trades'].pop(sym,None)
+def close_trade(tid, reason='manual'):
+    t=state['trades'].pop(tid,None)
     if not t: return
+    sym=t['symbol']; mode=t['mode']
     cached=cp(sym); sell=round(cached['price'] if cached else t['current'],2)
     pnl=round((sell-t['entry'])*t['shares'],2)
     pnl_pct=round((sell-t['entry'])/t['entry']*100,2)
     proceeds=round(sell*t['shares'],2)
-    state['completed_trades'].append({**t,'exit':sell,'exit_time':now_et(),'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
-    state['total_pnl']+=pnl; state['capital']+=proceeds
+    state['completed'].append({**t,'exit':sell,'exit_time':now_str(),'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
+    state['completed']=state['completed'][-200:]
+    state['pnl'][mode]=round(state['pnl'][mode]+pnl,2)
+    state['capital'][mode]=round(state['capital'][mode]+proceeds,2)
     save_state()
-    labels={'target':'TARGET HIT 🎯','stop':'STOP HIT 🛑','manual':'MANUAL EXIT','eod':'EOD CLOSE','momentum_stall':'TRAIL STOP'}
-    add_log(f"CLOSED {sym} {labels.get(reason,reason)} P&L ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+    label={'target':'🎯 TARGET','stop':'🛑 STOP','manual':'✋ MANUAL','eod':'🌙 EOD','swing_exit':'📅 SWING EXIT','lt_exit':'📅 LT EXIT'}
+    add_log(f"CLOSE {sym} [{mode.upper()}] {label.get(reason,reason)} ${pnl:+.2f} ({pnl_pct:+.1f}%)", alert=pnl>200 or reason=='target')
     if alpaca_trading:
         try: alpaca_trading.close_position(sym)
         except: pass
 
-def monitor_day_trades():
-    """Called every minute: update prices, check stops/targets."""
+def monitor_trades():
+    """Called every minute — update prices, check exits"""
     if not is_trading_day(): return
-    for sym, t in list(state['active_trades'].items()):
-        if t.get('tab') not in ('day', None): continue
-        cached=cp(sym)
+    for tid, t in list(state['trades'].items()):
+        cached=cp(t['symbol'])
         if not cached: continue
         price=cached['price']
-        state['active_trades'][sym]['current']=price
-        peak=max(price, t.get('peak',price))
-        state['active_trades'][sym]['peak']=peak
+        state['trades'][tid]['current']=price
+        peak=max(price,t.get('peak',price))
+        state['trades'][tid]['peak']=peak
         pnl_pct=(price-t['entry'])/t['entry']*100
         peak_pct=(peak-t['entry'])/t['entry']*100
-        state['active_trades'][sym]['peak_pnl_pct']=max(peak_pct,t.get('peak_pnl_pct',0))
+        state['trades'][tid]['peak_pnl_pct']=max(peak_pct,t.get('peak_pnl_pct',0))
+        mode=t['mode']
+        # Target hit
         if price>=t['target']:
-            close_day_trade(sym,'target'); continue
+            close_trade(tid,'target'); continue
+        # Stop hit
         if price<=t['stop']:
-            close_day_trade(sym,'stop'); continue
-        # Trailing: peak up 3%+, gives back 2pts
-        if peak_pct>=3 and (peak_pct-pnl_pct)>=2:
-            close_day_trade(sym,'momentum_stall'); continue
+            close_trade(tid,'stop'); continue
+        # Day trade: trailing stop if peak>=3%
+        if mode=='day' and peak_pct>=3 and (peak_pct-pnl_pct)>=2:
+            close_trade(tid,'momentum_stall'); continue
+        # Swing: time exit
+        if mode=='swing' and time.time()>t.get('exit_after',0) and not is_market_open():
+            close_trade(tid,'swing_exit'); continue
+        # Long term: only exit on big loss or huge gain
+        if mode=='longterm' and pnl_pct<=-15:
+            close_trade(tid,'stop'); continue
 
-# ══════════════════════════════════════════════════════════════════════
-# ── TAB 2: OPTIONS ENGINE ────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-OPT_LEVERAGE   = 5
-OPT_TARGET_PCT = 35
-OPT_STOP_PCT   = 25
+def whale_auto_enter():
+    """Auto-enter best whale signals when market is open"""
+    if not is_market_open(): return
+    whale_data=get_whale_data()
+    combined=whale_data.get('combined',[])
+    for w in combined[:10]:
+        sym=w['symbol']
+        # Skip if already in any trade
+        if any(t['symbol']==sym for t in state['trades'].values()): continue
+        tech=compute_technicals(sym)
+        if not tech: continue
+        rec=whale_score_and_recommend(sym,tech,w)
+        score=rec['score']
+        mode=rec['rec_mode']
+        if score>=70 and tech['signal']=='BUY':
+            ok,msg=enter_trade(sym,mode,manual=False,whale_data=w)
+            if ok:
+                add_log(f"🐋 WHALE AUTO ENTRY {sym} [{mode.upper()}] Score:{score}/99 Sources:{','.join(set(w['sources']))}", alert=True)
 
-def determine_option_strategy(sym, score, chg, vr, sig):
-    """Return CALL / PUT / STRADDLE + reasoning."""
-    if sig and sig['signal']=='BUY' and score>=60:
-        return 'CALL', f"BUY signal + score {score}/99 — bullish momentum play"
-    if sig and sig['signal']=='SELL' and chg<-2:
-        return 'PUT', f"SELL signal + bearish momentum — hedge or short play"
-    if vr>5 and abs(chg)>3:
-        return 'STRADDLE', f"Extreme volume {vr:.1f}x — big move expected either way"
-    if score>=65:
-        return 'CALL', f"Strong score {score}/99 — directional bullish"
-    return 'CALL', f"Score {score}/99 — mild bullish setup"
+# ── AI ANALYSIS ───────────────────────────────────────────────────────
+def ai_analyze(sym, tech, whale=None, mode=None):
+    """Full AI analysis with prediction and recommendation"""
+    price=tech['price'] if tech else 0
+    whale_info=''
+    if whale:
+        for item in whale.get('items',[])[:3]:
+            whale_info+=f"- {item.get('source')}: {item.get('title','')[:60]}\n"
+    sys_p=("You are AutoTrade Pro — expert trading AI for Abiy Kassa. "
+           "Give SPECIFIC price levels and CLEAR direction. 3-5 sentences max per section. "
+           "Always state exact BUY/WAIT/SELL and price targets.")
+    user_p=(f"Analyze {sym} for trading:\n"
+            f"Price: ${price:.2f} | Signal: {tech['signal'] if tech else '?'} | RSI: {tech['rsi'] if tech else '?'}\n"
+            f"VWAP: ${tech['vwap'] if tech else '?'} ({'above' if tech and tech['above_vwap'] else 'below'})\n"
+            f"EMA9: ${tech['ema9'] if tech else '?'} | EMA20: ${tech['ema20'] if tech else '?'} | EMA50: ${tech['ema50'] if tech else '?'}\n"
+            f"MACD: {'bullish' if tech and tech['macd_bull'] else 'bearish'} | ATR: {tech['atr'] if tech else '?'}\n"
+            f"Support: ${tech['support'] if tech else '?'} | Resistance: ${tech['resistance'] if tech else '?'}\n"
+            f"Trend (linear regression): {tech['trend'] if tech else '?'} | Daily vol: {tech['daily_vol'] if tech else '?'}%\n"
+            f"5-day price prediction: ${tech['pred_5d'] if tech else '?'} | 30-day: ${tech['pred_30d'] if tech else '?'} | 90-day: ${tech['pred_90d'] if tech else '?'}\n"
+            f"Whale activity:\n{whale_info if whale_info else 'No whale data'}\n"
+            f"Best mode per volatility: {tech['best_mode'] if tech else '?'}\n\n"
+            "Respond with:\n"
+            "1. SIGNAL: BUY/WAIT/SELL — one sentence why\n"
+            "2. Day Trade: entry zone, target, stop\n"
+            "3. Swing Trade (2-3wk): entry zone, target, stop\n"
+            "4. Long Term (3mo+): thesis and price target\n"
+            "5. PREDICTION: realistic 30-day price range\n"
+            "6. RISK: main risk in one sentence")
+    resp,src=ai_call(sys_p,user_p,max_tokens=600)
+    return resp or "AI unavailable — check GROQ_API_KEY",src or 'none'
 
-def refresh_option_candidates():
-    """Build top 5 option candidates from day picks + universe top scores."""
-    if not is_trading_day(): return
-    all_syms=list(dict.fromkeys(state['day_picks']+UNIVERSE[:15]))
-    quotes=get_full_quotes(all_syms[:20])
-    spy=cp('SPY'); qqq=cp('QQQ')
-    sp=spy['pct'] if spy else 0; qp=qqq['pct'] if qqq else 0
-    scored=[]
-    for q in quotes:
-        q['_score']=score_stock(q,sp,qp)
-        scored.append(q)
-    scored.sort(key=lambda x:x['_score'],reverse=True)
-    candidates=[]
-    for q in scored[:8]:
-        sym=q['symbol']; price=q['regularMarketPrice']
-        sig=compute_vwap_ema(sym)
-        strategy,reason=determine_option_strategy(
-            sym, q['_score'], q['regularMarketChangePercent'], q['_vr'], sig)
-        # Check if already tracking this one
-        existing=next((c for c in state['option_candidates'] if c['symbol']==sym),None)
-        if existing:
-            cached=cp(sym); cur=cached['price'] if cached else existing['entry_underlying']
-            underlying_chg=(cur-existing['entry_underlying'])/existing['entry_underlying']*100
-            pnl_pct=underlying_chg*OPT_LEVERAGE
-            existing.update({'current_underlying':round(cur,2),'sim_pnl_pct':round(pnl_pct,2),
-                             'signal':sig,'score':q['_score']})
-            peak=max(existing.get('peak_pnl_pct',0),pnl_pct)
-            existing['peak_pnl_pct']=peak
-            # Check exits
-            if pnl_pct>=OPT_TARGET_PCT:
-                state['option_candidates'].remove(existing)
-                state['option_history'].insert(0,{**existing,'reason':'target','exit_time':now_et(),'sim_pnl_pct':pnl_pct})
-                add_log(f"OPTIONS TARGET {sym} +{pnl_pct:.0f}% 🎯")
-            elif pnl_pct<=-OPT_STOP_PCT:
-                state['option_candidates'].remove(existing)
-                state['option_history'].insert(0,{**existing,'reason':'stop','exit_time':now_et(),'sim_pnl_pct':pnl_pct})
-                add_log(f"OPTIONS STOP {sym} {pnl_pct:.0f}% 🛑")
-        else:
-            if len(candidates)+len([c for c in state['option_candidates'] if c not in candidates])>=5:
-                break
-            entry={'symbol':sym,'strategy':strategy,'reason':reason,
-                   'score':q['_score'],'entry_underlying':round(price,2),
-                   'current_underlying':round(price,2),'entry_time':now_et(),
-                   'entered_at':time.time(),'sim_pnl_pct':0.0,'peak_pnl_pct':0.0,
-                   'signal':sig}
-            candidates.append(entry)
-    # Add new candidates if slots open
-    tracked=set(c['symbol'] for c in state['option_candidates'])
-    for c in candidates:
-        if len(state['option_candidates'])>=5: break
-        if c['symbol'] not in tracked:
-            state['option_candidates'].append(c)
-            tracked.add(c['symbol'])
-    state['option_history']=state['option_history'][:30]
-    save_state()
+# ── DAILY REPORT ──────────────────────────────────────────────────────
+def generate_daily_report():
+    all_trades=state['completed']
+    today_trades=[t for t in all_trades if t.get('exit_time','').endswith('ET') and
+                  datetime.now(ET_TZ).strftime('%Y-%m-%d') in (t.get('exit_time') or '')]
+    total_pnl=sum(v for v in state['pnl'].values())
+    wins=[t for t in today_trades if t.get('pnl',0)>=0]
+    losses=[t for t in today_trades if t.get('pnl',0)<0]
+    open_t=list(state['trades'].values())
+    sys_p="You are AutoTrade Pro. Write a concise daily trading report. Professional but clear."
+    user_p=(f"Daily Report — {today_str()}\n"
+            f"Total P&L: ${total_pnl:+.2f}\n"
+            f"Day P&L: ${state['pnl']['day']:+.2f} | Swing: ${state['pnl']['swing']:+.2f} | LT: ${state['pnl']['longterm']:+.2f}\n"
+            f"Closed trades: {len(today_trades)} ({len(wins)} wins, {len(losses)} losses)\n"
+            f"Open positions: {len(open_t)}: {', '.join(t['symbol'] for t in open_t)}\n"
+            f"Whale signals today: {len(_whale_cache.get('combined',[]))}\n"
+            f"Best trade: {max(today_trades,key=lambda x:x.get('pnl',0),default={}).get('symbol','none')} | "
+            f"Worst: {min(today_trades,key=lambda x:x.get('pnl',0),default={}).get('symbol','none')}\n\n"
+            "Write: Performance summary (2 sentences), Key insights (3 bullets), Tomorrow's watchlist from open positions.")
+    report,_=ai_call(sys_p,user_p,max_tokens=400)
+    state['daily_report']={'text':report or 'Report unavailable','date':today_str(),'ts':now_str()}
+    msg=(f"📊 AutoTrade Pro Daily Report — {today_str()}\n{'━'*25}\n"
+         f"P&L: ${total_pnl:+.2f} | {len(wins)}W/{len(losses)}L\n"
+         f"Open: {len(open_t)} positions\n\n{report or ''}")
+    tg(msg)
+    add_log(f"Daily report generated: P&L ${total_pnl:+.2f} {len(wins)}W/{len(losses)}L")
 
-# ══════════════════════════════════════════════════════════════════════
-# ── TAB 3: CUSTOM DEEP RESEARCH ──────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════
-
-def deep_research(sym):
-    """Full AI analysis of a ticker — returns structured research dict."""
-    cached=cp(sym)
-    if not cached:
-        try:
-            tk=yf.Ticker(sym); info=tk.fast_info
-            price=float(getattr(info,'last_price',0) or 0)
-            cached={'price':price,'pct':0} if price>0 else None
-        except: pass
-    if not cached or cached['price']<=0:
-        return {'symbol':sym,'error':'No price data','signal':None,'analysis':None}
-
-    price=cached['price']; chg=cached['pct']
-    sig=compute_vwap_ema(sym)
-    lvl=compute_atr_levels(sym, price)
-    news=get_symbol_news(sym)
-
-    # Get full quote data
-    quotes=get_full_quotes([sym])
-    q=quotes[0] if quotes else {}
-    score=score_stock(q) if q else 0
-    vr=q.get('_vr',0) if q else 0
-    hi52=q.get('fiftyTwoWeekHigh',price) if q else price
-    lo52=q.get('fiftyTwoWeekLow',price) if q else price
-    annual_range=((hi52-lo52)/lo52*100) if lo52>0 else 0
-
-    # Build context for AI
-    sys_prompt = (
-        "You are AutoTrade Pro AI — a professional day trading assistant for Abiy Kassa. "
-        "You give SPECIFIC, ACTIONABLE direction. Be direct and concise. "
-        "Always end with: SIGNAL: BUY / WAIT / SELL and WHY in one sentence."
-    )
-    user_msg = (
-        f"Deep analysis for {sym}:\n"
-        f"Price: ${price:.2f} | Change: {chg:+.2f}% | Score: {score}/99\n"
-        f"Volume ratio: {vr:.1f}x | 52w range: ${lo52:.2f}–${hi52:.2f} (annual range {annual_range:.0f}%)\n"
-        f"VWAP signal: {sig['signal'] if sig else 'N/A'} — {sig['reason'] if sig else ''}\n"
-        f"RSI: {sig['rsi'] if sig else 'N/A'} | EMA9: {sig['ema9'] if sig else 'N/A':.2f} | EMA20: {sig['ema20'] if sig else 'N/A':.2f}\n"
-        f"ATR Stop: ${lvl['stop']:.2f} (-{lvl['stop_pct']:.1f}%) | ATR Target: ${lvl['target']:.2f} (+{lvl['target_pct']:.1f}%)\n"
-        f"Recent news: {' | '.join(news[:3]) if news else 'None'}\n\n"
-        "Give: 1) Market context (1-2 sentences), 2) Technical read (2-3 sentences with RSI/VWAP/EMA analysis), "
-        "3) Entry zone and exact price levels, 4) Risk/reward, 5) SIGNAL: BUY/WAIT/SELL + one-sentence reason."
-    )
-    analysis, ai_source = ai_call(sys_prompt, user_msg, max_tokens=500)
-
-    # Determine entry zone
-    if sig:
-        if sig['signal']=='BUY':
-            entry_zone=f"${sig['vwap']:.2f}–${price:.2f}"
-            entry_note="Enter on VWAP hold or pullback to EMA9"
-        elif sig['signal']=='SELL':
-            entry_zone="Avoid long entry"
-            entry_note="Wait for signal to turn BUY before entering"
-        else:
-            entry_zone=f"${sig['vwap']:.2f}–${sig['ema9']:.2f}"
-            entry_note="Wait — price consolidating near VWAP"
-    else:
-        entry_zone=f"${lvl['support']:.2f}–${price:.2f}"
-        entry_note="No intraday data yet — use ATR levels"
-
-    result={
-        'symbol':sym,'price':price,'change_pct':chg,'score':score,
-        'signal':sig,'levels':lvl,'vr':vr,'rsi':sig['rsi'] if sig else None,
-        'annual_range':round(annual_range,1),'news':news,
-        'entry_zone':entry_zone,'entry_note':entry_note,
-        'analysis':analysis,'ai_source':ai_source,
-        'last_updated':now_et(),'hi52':hi52,'lo52':lo52
-    }
-    state['custom_research'][sym]=result
-    return result
-
-def monitor_custom_trades():
-    """Monitor custom-tab trades — same stop/target logic."""
-    for sym, t in list(state['custom_trades'].items()):
-        cached=cp(sym)
-        if not cached: continue
-        price=cached['price']
-        state['custom_trades'][sym]['current']=price
-        pnl_pct=(price-t['entry'])/t['entry']*100
-        peak_pct=max((price-t['entry'])/t['entry']*100, t.get('peak_pnl_pct',0))
-        state['custom_trades'][sym]['peak_pnl_pct']=peak_pct
-        if price>=t['target']:
-            t_copy=state['custom_trades'].pop(sym)
-            state['completed_trades'].append({**t_copy,'exit':price,'exit_time':now_et(),
-                'pnl':round((price-t_copy['entry'])*t_copy['shares'],2),
-                'pnl_pct':round(pnl_pct,2),'reason':'target','tab':'custom'})
-            state['total_pnl']+=round((price-t_copy['entry'])*t_copy['shares'],2)
-            add_log(f"CUSTOM TARGET {sym} +{pnl_pct:.1f}% 🎯")
-            save_state()
-        elif price<=t['stop']:
-            t_copy=state['custom_trades'].pop(sym)
-            pnl=round((price-t_copy['entry'])*t_copy['shares'],2)
-            state['completed_trades'].append({**t_copy,'exit':price,'exit_time':now_et(),
-                'pnl':pnl,'pnl_pct':round(pnl_pct,2),'reason':'stop','tab':'custom'})
-            state['total_pnl']+=pnl
-            add_log(f"CUSTOM STOP {sym} {pnl_pct:.1f}% 🛑")
-            save_state()
-
-# ── SCHEDULED JOBS ────────────────────────────────────────────────────
+# ── SCHEDULER ─────────────────────────────────────────────────────────
 def job_morning():
     if not is_trading_day(): return
     state['date']=today_str()
-    state['capital']=10000.0; state['starting_capital']=10000.0
-    state['total_pnl']=0.0; state['completed_trades']=[]
-    state['active_trades']={}; state['option_candidates']=[]
-    run_morning_scan()
-
-def job_945():
-    if not is_trading_day() or state['active_trades']: return
-    run_morning_scan()
+    state['pnl']={'day':0.0,'swing':0.0,'longterm':0.0}
+    state['capital']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
+    state['starting']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
+    add_log("🌅 New trading day started")
+    refresh_whale_data()
+    tg(f"🌅 AutoTrade Pro — {today_str()} open\nWhale scan running...")
 
 def job_minute():
     if not is_trading_day(): return
     state['date']=today_str()
-    refresh_pick_signals()
-    monitor_day_trades()
-    monitor_custom_trades()
-    # Auto-enter on clean BUY signals for day picks
-    t_now=datetime.now(ET_TZ)
-    t_min=t_now.hour*60+t_now.minute
-    if is_market_open() and t_min>=585:  # after 9:45
-        for sym in state['day_picks']:
-            if sym in state['active_trades']: continue
-            detail=state['pick_details'].get(sym,{})
-            sig=detail.get('signal')
-            if sig and sig['signal']=='BUY' and sig['rsi'] and sig['rsi']<70:
-                enter_day_trade(sym)
+    monitor_trades()
+    if is_market_open():
+        t=now_et().hour*60+now_et().minute
+        if t>=585: whale_auto_enter()  # after 9:45
+
+def job_whale():
+    refresh_whale_data()
 
 def job_eod():
     if not is_trading_day(): return
-    for sym in list(state['active_trades'].keys()):
-        close_day_trade(sym,'eod')
-    for sym in list(state['custom_trades'].keys()):
-        t=state['custom_trades'].pop(sym)
-        cached=cp(sym); sell=cached['price'] if cached else t['current']
-        pnl=round((sell-t['entry'])*t['shares'],2)
-        pnl_pct=round((sell-t['entry'])/t['entry']*100,2)
-        state['completed_trades'].append({**t,'exit':sell,'exit_time':now_et(),
-            'pnl':pnl,'pnl_pct':pnl_pct,'reason':'eod','tab':'custom'})
-        state['total_pnl']+=pnl
-    pct=state['total_pnl']/state['starting_capital']*100 if state['starting_capital'] else 0
-    add_log(f"EOD — P&L ${state['total_pnl']:+.2f} ({pct:+.2f}%)")
+    for tid in [t for t,v in state['trades'].items() if v['mode']=='day']:
+        close_trade(tid,'eod')
+    generate_daily_report()
     save_state()
-
-def job_options():
-    if is_trading_day(): refresh_option_candidates()
 
 def job_keepalive():
-    n=datetime.now(ET_TZ); t=n.hour*60+n.minute
-    if n.weekday()>=5 or t<7*60 or t>17*60: return
-    try: urllib.request.urlopen(urllib.request.Request(f"{get_app_url()}/ping",headers={'User-Agent':UA}),timeout=8)
+    url=APP_URL or f"http://localhost:{PORT}"
+    try: urllib.request.urlopen(urllib.request.Request(f"{url}/ping",headers={'User-Agent':UA}),timeout=8)
     except: pass
 
-# ── FLASK ROUTES ──────────────────────────────────────────────────────
-def cors(d):
-    r=jsonify(d); r.headers['Access-Control-Allow-Origin']='*'; return r
-
-@app.route('/') 
+# ══════════════════════════════════════════════════════════════════════
+# ── ROUTES ────────────────────────════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+@app.route('/')
 def index(): return send_from_directory('.','index.html')
-@app.route('/ping') 
-def ping(): return cors({'ok':True,'time':now_et()})
+@app.route('/ping')
+def ping(): return _cors({'ok':True,'time':now_str(),'market':is_market_open()})
+
+@app.route('/whale-data')
+def whale_data_route():
+    d=get_whale_data()
+    return _cors({'combined':d.get('combined',[])[:25],
+                  'sec4':d.get('sec4',[]),'congress':d.get('congress',[]),
+                  'unusual':d.get('unusual',[]),'ts':d.get('ts',0),
+                  'age_min':round((time.time()-d.get('ts',time.time()))/60,1)})
+
+@app.route('/whale-refresh', methods=['POST'])
+def whale_refresh():
+    threading.Thread(target=refresh_whale_data,daemon=True).start()
+    return _cors({'ok':True,'msg':'Refreshing whale data...'})
 
 @app.route('/prices')
-def prices():
-    src='alpaca_realtime' if alpaca_data else 'yfinance_delayed'
-    return cors({'data':all_prices(),'source':src,'fresh':(time.time()-_cache_ts)<10,
-                 'delay':'~0sec' if alpaca_data else '~15min',
-                 'updated':datetime.fromtimestamp(_cache_ts,ET_TZ).strftime('%H:%M:%S') if _cache_ts else '—'})
+def prices_route():
+    p=all_prices()
+    return _cors({'data':p,'src':'live' if alpaca_data else 'delayed','ts':_price_ts})
 
-# ── Tab 1 routes ──────────────────────────────────────────────────────
-@app.route('/day-status')
-def day_status():
-    picks_out=[]
-    for sym in state['day_picks']:
-        detail=state['pick_details'].get(sym,{})
-        cached=cp(sym)
-        price=cached['price'] if cached else 0
-        active=state['active_trades'].get(sym)
-        if active and cached: state['active_trades'][sym]['current']=cached['price']
-        picks_out.append({'symbol':sym,'price':price,'pct':cached['pct'] if cached else 0,
-            'score':detail.get('score',0),'signal':detail.get('signal'),
-            'levels':detail.get('levels'),'active_trade':active,
-            'last_updated':detail.get('last_updated','—')})
-    completed_day=[t for t in state['completed_trades'] if t.get('tab') in ('day',None)]
-    return cors({'picks':picks_out,'active_trades':state['active_trades'],
-        'completed':completed_day,'capital':round(state['capital'],2),
-        'starting_capital':state['starting_capital'],
-        'total_pnl':round(state['total_pnl'],2),
-        'date':state['date'],'log':state['log'][:15],
-        'last_scan':state['last_scan']})
-
-@app.route('/day-picks', methods=['POST'])
-def set_day_picks():
-    data=request.get_json() or {}
-    syms=[s.strip().upper().replace(' ','') for s in data.get('symbols',[]) if s.strip()][:5]
-    state['day_picks']=list(dict.fromkeys(syms))
-    # Trigger signal computation in background
-    def compute():
-        for sym in state['day_picks']:
-            try:
-                quotes=get_full_quotes([sym])
-                q=quotes[0] if quotes else None
-                if q:
-                    sig=compute_vwap_ema(sym); lvl=compute_atr_levels(sym,q['regularMarketPrice'])
-                    state['pick_details'][sym]={'quote':q,'signal':sig,'levels':lvl,'score':q.get('_score',0),'last_updated':now_et()}
-            except: pass
-    threading.Thread(target=compute,daemon=True).start()
-    save_state()
-    return cors({'ok':True,'picks':state['day_picks']})
-
-@app.route('/day-scan', methods=['POST'])
-def day_scan():
-    threading.Thread(target=run_morning_scan,daemon=True).start()
-    return cors({'ok':True,'msg':'Scan started — takes ~60s'})
-
-@app.route('/day-enter', methods=['POST'])
-def day_enter():
-    data=request.get_json() or {}
-    sym=data.get('symbol','').upper()
-    ok,msg=enter_day_trade(sym, manual=True)
-    return cors({'ok':ok,'msg':msg})
-
-@app.route('/day-close', methods=['POST'])
-def day_close():
-    data=request.get_json() or {}
-    sym=data.get('symbol','').upper()
-    reason=data.get('reason','manual')
-    if sym not in state['active_trades']:
-        return cors({'ok':False,'msg':f'{sym} not active'})
-    close_day_trade(sym, reason)
-    return cors({'ok':True,'msg':f'Closed {sym}'})
-
-@app.route('/day-signal')
-def day_signal():
+@app.route('/technicals')
+def technicals():
     sym=request.args.get('symbol','').upper()
-    if not sym: return cors({'signal':None})
-    return cors({'signal':compute_vwap_ema(sym)})
+    if not sym: return _cors({'error':'No symbol'})
+    tech=compute_technicals(sym)
+    return _cors({'technicals':tech,'symbol':sym})
 
 @app.route('/candles')
 def candles():
     sym=request.args.get('symbol','').upper()
-    if not sym: return cors({'bars':[]})
+    period=request.args.get('period','1d')
+    interval=request.args.get('interval','5m')
+    if not sym: return _cors({'bars':[]})
     try:
-        df=yf.download(sym,period='5d',interval='5m',auto_adjust=True,progress=False)
-        if df.empty: df=yf.download(sym,period='1mo',interval='15m',auto_adjust=True,progress=False)
+        df=get_candles(sym,period,interval)
+        if df.empty: return _cors({'bars':[],'symbol':sym})
         if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.get_level_values(0)
-        df=df.dropna().tail(78)
+        df=df.dropna().tail(100)
         bars=[]
         for i,r in df.iterrows():
             try:
-                idx_et=i.tz_convert(ET_TZ) if i.tzinfo else i.tz_localize('UTC').tz_convert(ET_TZ)
-                hm=idx_et.strftime('%H:%M')
+                idx_et=i.tz_convert(ET_TZ) if hasattr(i,'tzinfo') and i.tzinfo else i
+                hm=str(idx_et)[11:16] if ' ' in str(idx_et) else str(idx_et)[-8:-3]
             except: hm=str(i)[11:16]
-            bars.append({'t':str(i),'hm':hm,'o':round(float(r.Open),2),'h':round(float(r.High),2),
-                         'l':round(float(r.Low),2),'c':round(float(r.Close),2),'v':int(r.Volume)})
-        return cors({'bars':bars,'symbol':sym})
-    except Exception as e: return cors({'bars':[],'error':str(e)})
+            bars.append({'t':str(i),'hm':hm,'o':round(float(r.Open),3),'h':round(float(r.High),3),
+                         'l':round(float(r.Low),3),'c':round(float(r.Close),3),'v':int(r.Volume)})
+        return _cors({'bars':bars,'symbol':sym})
+    except Exception as e: return _cors({'bars':[],'error':str(e)})
 
-# ── Tab 2 routes ──────────────────────────────────────────────────────
-@app.route('/options-status')
-def options_status():
-    # Update current prices/pnl inline
-    out=[]
-    for c in state['option_candidates']:
-        cached=cp(c['symbol'])
-        if cached:
-            cur=cached['price']
-            underlying_chg=(cur-c['entry_underlying'])/c['entry_underlying']*100
-            pnl=underlying_chg*OPT_LEVERAGE
-            c.update({'current_underlying':round(cur,2),'sim_pnl_pct':round(pnl,2)})
-        out.append(c)
-    return cors({'candidates':out,'history':state['option_history'][:20],
-                 'max_slots':5,'leverage':OPT_LEVERAGE,
-                 'target_pct':OPT_TARGET_PCT,'stop_pct':OPT_STOP_PCT})
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    d=request.get_json() or {}
+    sym=d.get('symbol','').upper()
+    if not sym: return _cors({'ok':False})
+    def do():
+        tech=compute_technicals(sym)
+        whale=next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym),None)
+        rec=whale_score_and_recommend(sym,tech,whale) if tech else {}
+        analysis,ai_src=ai_analyze(sym,tech,whale)
+        state.setdefault('analysis_cache',{})[sym]={
+            'tech':tech,'whale':whale,'rec':rec,
+            'analysis':analysis,'ai_src':ai_src,'ts':now_str(),'symbol':sym
+        }
+    threading.Thread(target=do,daemon=True).start()
+    return _cors({'ok':True,'msg':f'Analyzing {sym}...'})
 
-@app.route('/options-refresh', methods=['POST'])
-def options_refresh():
-    threading.Thread(target=refresh_option_candidates,daemon=True).start()
-    return cors({'ok':True,'msg':'Refreshing...'})
-
-# ── Tab 3 routes ──────────────────────────────────────────────────────
-@app.route('/research', methods=['POST'])
-def research():
-    data=request.get_json() or {}
-    sym=data.get('symbol','').upper()
-    if not sym: return cors({'ok':False,'msg':'No symbol'})
-    if sym not in state['custom_watchlist']:
-        state['custom_watchlist'].append(sym)
-        if len(state['custom_watchlist'])>10: state['custom_watchlist']=state['custom_watchlist'][-10:]
-        save_state()
-    def do_research():
-        result=deep_research(sym)
-        state['custom_research'][sym]=result
-    threading.Thread(target=do_research,daemon=True).start()
-    return cors({'ok':True,'msg':f'Research started for {sym}','symbol':sym})
-
-@app.route('/research-result')
-def research_result():
+@app.route('/analysis-result')
+def analysis_result():
     sym=request.args.get('symbol','').upper()
-    result=state['custom_research'].get(sym)
-    return cors({'result':result,'ready':result is not None})
+    r=state.get('analysis_cache',{}).get(sym)
+    return _cors({'result':r,'ready':r is not None})
 
-@app.route('/custom-enter', methods=['POST'])
-def custom_enter():
-    data=request.get_json() or {}
-    sym=data.get('symbol','').upper()
-    if not is_market_open(): return cors({'ok':False,'msg':'Market closed'})
-    if sym in state['custom_trades']: return cors({'ok':False,'msg':f'Already tracking {sym}'})
-    cached=cp(sym)
-    if not cached: return cors({'ok':False,'msg':'No price data'})
-    price=cached['price']
-    alloc=min(state['capital'], 5000)  # max $5k per custom trade
-    if alloc<price: return cors({'ok':False,'msg':f'Need ${price:.2f}, have ${state["capital"]:.2f}'})
-    shares=int(alloc/price)
-    lvl=compute_atr_levels(sym,price)
-    trade={'symbol':sym,'entry':round(price,2),'shares':shares,'cost':round(shares*price,2),
-           'target':lvl['target'],'stop':lvl['stop'],'current':round(price,2),
-           'peak':round(price,2),'peak_pnl_pct':0.0,'entry_time':now_et(),
-           'entered_at':time.time(),'tab':'custom'}
-    state['custom_trades'][sym]=trade
-    state['capital']-=trade['cost']
-    save_state()
-    add_log(f"CUSTOM ENTER {sym} {shares}sh @${price:.2f}")
-    if alpaca_trading:
-        try:
-            alpaca_trading.submit_order(MarketOrderRequest(
-                symbol=sym,qty=shares,side=OrderSide.BUY,time_in_force=TimeInForce.DAY))
-        except Exception as e: print(f"  Alpaca custom: {e}")
-    return cors({'ok':True,'msg':f'Entered {sym}','trade':trade})
+@app.route('/trades')
+def trades_route():
+    trades_out=[]
+    for tid,t in state['trades'].items():
+        cached=cp(t['symbol'])
+        if cached: state['trades'][tid]['current']=cached['price']
+        ct=state['trades'][tid]
+        pnl=(ct['current']-ct['entry'])*ct['shares']
+        pnl_pct=(ct['current']-ct['entry'])/ct['entry']*100
+        trades_out.append({**ct,'pnl':round(pnl,2),'pnl_pct':round(pnl_pct,2),'id':tid})
+    return _cors({
+        'trades':trades_out,'completed':state['completed'][-30:],
+        'capital':state['capital'],'pnl':state['pnl'],'starting':state['starting'],
+        'log':state['log'][:20],'ai_alerts':state['ai_alerts'][:10]
+    })
 
-@app.route('/custom-close', methods=['POST'])
-def custom_close():
-    data=request.get_json() or {}
-    sym=data.get('symbol','').upper()
-    t=state['custom_trades'].pop(sym,None)
-    if not t: return cors({'ok':False,'msg':f'{sym} not tracked'})
-    cached=cp(sym); sell=cached['price'] if cached else t['current']
-    pnl=round((sell-t['entry'])*t['shares'],2)
-    pnl_pct=round((sell-t['entry'])/t['entry']*100,2)
-    proceeds=round(sell*t['shares'],2)
-    state['completed_trades'].append({**t,'exit':sell,'exit_time':now_et(),'pnl':pnl,'pnl_pct':pnl_pct,'reason':'manual','tab':'custom'})
-    state['total_pnl']+=pnl; state['capital']+=proceeds
-    save_state()
-    add_log(f"CUSTOM CLOSE {sym} P&L ${pnl:+.2f} ({pnl_pct:+.2f}%)")
-    if alpaca_trading:
-        try: alpaca_trading.close_position(sym)
-        except: pass
-    return cors({'ok':True,'msg':f'Closed {sym}','pnl':pnl,'pnl_pct':pnl_pct})
+@app.route('/enter', methods=['POST'])
+def enter_route():
+    d=request.get_json() or {}
+    sym=d.get('symbol','').upper(); mode=d.get('mode','day')
+    # Find whale data
+    whale=next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym),None)
+    ok,msg=enter_trade(sym,mode,manual=True,whale_data=whale)
+    return _cors({'ok':ok,'msg':msg})
 
-@app.route('/custom-status')
-def custom_status():
-    out={}
-    for sym,t in state['custom_trades'].items():
-        cached=cp(sym)
-        if cached: state['custom_trades'][sym]['current']=cached['price']
-        out[sym]=state['custom_trades'][sym]
-    completed_custom=[t for t in state['completed_trades'] if t.get('tab')=='custom']
-    return cors({'trades':out,'research':state['custom_research'],
-                 'watchlist':state['custom_watchlist'],
-                 'completed':completed_custom[-20:]})
+@app.route('/close', methods=['POST'])
+def close_route():
+    d=request.get_json() or {}
+    tid=d.get('id','')
+    if tid not in state['trades']: return _cors({'ok':False,'msg':'Trade not found'})
+    close_trade(tid, d.get('reason','manual'))
+    return _cors({'ok':True})
 
-# ── Shared routes ─────────────────────────────────────────────────────
 @app.route('/chat', methods=['POST'])
 def chat():
-    data=request.get_json() or {}
-    msg=data.get('message','').strip()
-    sym=data.get('symbol','').upper()
-    tab=data.get('tab','day')
-    if not msg: return cors({'ok':False})
-    # Build rich context
-    ctx=[]
-    ctx.append(f"Today: {today_str()} | Capital: ${state['capital']:.2f} | P&L: ${state['total_pnl']:+.2f}")
-    ctx.append(f"Day picks: {', '.join(state['day_picks']) or 'none'}")
-    ctx.append(f"Active trades: {', '.join(state['active_trades'].keys()) or 'none'}")
-    if sym and sym in state['custom_research']:
-        r=state['custom_research'][sym]
-        ctx.append(f"Research on {sym}: score {r.get('score',0)}/99, signal {r.get('signal',{}).get('signal','?')}, RSI {r.get('rsi','?')}")
-    if sym and state['pick_details'].get(sym):
-        d=state['pick_details'][sym]
-        sig=d.get('signal',{})
-        ctx.append(f"{sym} live signal: {sig.get('signal','?')} — {sig.get('reason','')}")
-    mkt=all_prices()
-    ctx.append(f"SPY {mkt.get('SPY',{}).get('pct',0):+.2f}% | QQQ {mkt.get('QQQ',{}).get('pct',0):+.2f}%")
-    sys_prompt=(
-        "You are AutoTrade Pro AI for Abiy Kassa — professional day trading assistant. "
-        "Give specific, actionable advice. Be concise (3-5 sentences max). "
-        "Reference real prices and levels when available. Never give generic disclaimers — this is paper trading.\n"
-        "Context:\n" + "\n".join(ctx)
-    )
-    response, ai_source = ai_call(sys_prompt, msg, max_tokens=350)
-    if not response:
-        response="No AI key configured. Add GROQ_API_KEY to Render environment variables."
-        ai_source='none'
-    return cors({'ok':True,'response':response,'ai_source':ai_source,'symbol':sym})
+    d=request.get_json() or {}
+    msg=d.get('message','').strip(); sym=d.get('symbol','')
+    if not msg: return _cors({'ok':False})
+    trades_summary='; '.join(f"{t['symbol']}[{t['mode']}] ${t.get('pnl',0):+.1f}" for t in state['trades'].values())
+    pnl_summary=f"Day ${state['pnl']['day']:+.0f} | Swing ${state['pnl']['swing']:+.0f} | LT ${state['pnl']['longterm']:+.0f}"
+    whale_top=', '.join(w['symbol'] for w in _whale_cache.get('combined',[])[:5])
+    ctx=(f"Context: {today_str()} | {pnl_summary}\n"
+         f"Open trades: {trades_summary or 'none'}\n"
+         f"Top whale signals: {whale_top or 'none'}\n"
+         f"Market open: {is_market_open()}")
+    if sym and sym in state.get('analysis_cache',{}):
+        r=state['analysis_cache'][sym]
+        tech=r.get('tech',{})
+        ctx+=f"\n{sym} signal: {tech.get('signal','?')} RSI:{tech.get('rsi','?')} VWAP:{'above' if tech.get('above_vwap') else 'below'}"
+    sys_p=("AutoTrade Pro AI for Abiy Kassa. Expert day/swing/long-term trader. "
+           "Be specific, direct, cite real prices. 3-5 sentences. Paper trading.\n"+ctx)
+    resp,src=ai_call(sys_p,msg,max_tokens=400)
+    return _cors({'ok':True,'response':resp or 'AI unavailable','src':src})
+
+@app.route('/daily-report')
+def daily_report():
+    if not state.get('daily_report'):
+        threading.Thread(target=generate_daily_report,daemon=True).start()
+        return _cors({'report':None,'generating':True})
+    return _cors({'report':state['daily_report']})
+
+@app.route('/test-telegram')
+def test_tg():
+    ok=tg(f"✅ AutoTrade Pro v3 ALIVE\nAI: {'Groq✅' if GROQ_KEY else '❌'} | Alpaca: {'✅' if alpaca_trading else '❌'}\nOpen trades: {len(state['trades'])}")
+    return _cors({'ok':ok})
 
 @app.route('/news')
-def news_route():
-    sym=request.args.get('symbol','')
-    if sym: return cors({'items':get_symbol_news(sym.upper())})
-    return cors({'items':get_news()})
+def news():
+    sym=request.args.get('symbol','NVDA')
+    items=[]
+    try:
+        url=f'https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym}&region=US&lang=en-US'
+        data=http_get(url,timeout=7).decode('utf-8','replace')
+        tree=ET.fromstring(data)
+        for it in list(tree.iter('item'))[:8]:
+            t=it.find('title')
+            if t is not None and t.text:
+                items.append({'title':t.text.strip(),'pub':''})
+    except: pass
+    return _cors({'items':items})
 
 @app.route('/performance')
 def performance():
-    trades=state['completed_trades']
-    if not trades: return cors({'trades':0,'win_rate':0,'total_pnl':0,'avg_win':0,'avg_loss':0})
-    wins=[t for t in trades if t.get('pnl',0)>=0]
-    losses=[t for t in trades if t.get('pnl',0)<0]
-    return cors({'trades':len(trades),'win_rate':round(len(wins)/len(trades)*100,1),
-                 'total_pnl':round(sum(t.get('pnl',0) for t in trades),2),
-                 'avg_win':round(sum(t.get('pnl',0) for t in wins)/len(wins),2) if wins else 0,
-                 'avg_loss':round(sum(t.get('pnl',0) for t in losses)/len(losses),2) if losses else 0})
+    c=state['completed']
+    if not c: return _cors({'trades':0,'win_rate':0,'best':0,'worst':0})
+    wins=[t for t in c if t.get('pnl',0)>=0]
+    return _cors({'trades':len(c),'wins':len(wins),'losses':len(c)-len(wins),
+                  'win_rate':round(len(wins)/len(c)*100,1),
+                  'total_pnl':round(sum(t.get('pnl',0) for t in c),2),
+                  'best':max(t.get('pnl',0) for t in c),
+                  'worst':min(t.get('pnl',0) for t in c),
+                  'by_mode':{m:round(state['pnl'][m],2) for m in ('day','swing','longterm')}})
 
-@app.route('/test-telegram')
-def test_telegram():
-    ok=tg(f"✅ AutoTrade Pro alive | Alpaca: {'✅' if alpaca_trading else '❌'} | AI: {'Groq ✅' if GROQ_KEY else ('Anthropic ✅' if ANTHROPIC_KEY else '❌')}\n{get_app_url()}")
-    return cors({'ok':ok})
-
-@app.route('/notify')
-def notify():
-    return cors({'ok':tg(request.args.get('msg','')) if request.args.get('msg') else False})
-
-@app.route('/watchlist', methods=['GET','POST'])
-def watchlist():
-    if request.method=='POST':
-        data=request.get_json() or {}
-        syms=[s.strip().upper() for s in data.get('symbols',[]) if s.strip()]
-        state['custom_watchlist']=syms[:10]; save_state()
-        return cors({'ok':True,'symbols':state['custom_watchlist']})
-    return cors({'symbols':state['custom_watchlist']})
-
-# ── START ─────────────────────────────────────────────────────────────
+# ── BOOT ──────────────────────────────────────────────────────────────
 load_state()
-load_prev_closes()
 threading.Thread(target=price_thread,daemon=True).start()
+threading.Thread(target=refresh_whale_data,daemon=True).start()
+
 import atexit
 try:
     sched=BackgroundScheduler(timezone=ET_TZ)
-    sched.add_job(job_morning, 'cron',day_of_week='mon-fri',hour=8,minute=0)
-    sched.add_job(job_945,     'cron',day_of_week='mon-fri',hour=9,minute=45)
-    sched.add_job(job_minute,  'cron',day_of_week='mon-fri',hour='8-16',minute='*')
-    sched.add_job(job_options, 'cron',day_of_week='mon-fri',hour='9-16',minute='*/15')
-    sched.add_job(job_eod,     'cron',day_of_week='mon-fri',hour=15,minute=55)
-    sched.add_job(job_keepalive,'interval',minutes=10)
+    sched.add_job(job_morning,'cron',day_of_week='mon-fri',hour=8,minute=0)
+    sched.add_job(job_minute,'cron',day_of_week='mon-fri',hour='8-16',minute='*')
+    sched.add_job(job_whale,'cron',day_of_week='mon-fri',hour='8-16',minute='*/20')
+    sched.add_job(job_eod,'cron',day_of_week='mon-fri',hour=15,minute=55)
+    sched.add_job(job_keepalive,'interval',minutes=8)
     sched.start(); atexit.register(lambda:sched.shutdown(wait=False))
-    print(f"  Scheduler: {len(sched.get_jobs())} jobs")
-except Exception as e: print(f"  Scheduler: {e}")
+    print(f"Scheduler: {len(sched.get_jobs())} jobs ✅")
+except Exception as e: print(f"Scheduler: {e}")
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=PORT,debug=False)
