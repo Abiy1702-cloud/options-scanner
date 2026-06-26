@@ -469,42 +469,75 @@ _price_lock  = threading.Lock()
 
 def price_thread():
     global _price_ts
-    base_syms = ['SPY','QQQ','VIX','NVDA','TSLA','AAPL','MSFT','AMZN','META','GOOGL',
-                 'SOXL','TQQQ','MSTR','COIN','AMD','PLTR','MU','SMCI']
+    # Stock symbols (Alpaca-compatible)
+    base_stocks = ['SPY','QQQ','NVDA','TSLA','AAPL','MSFT','AMZN','META','GOOGL',
+                   'SOXL','TQQQ','MSTR','COIN','AMD','PLTR','MU','SMCI','DRAM']
+    # These need yfinance always — not available on Alpaca
+    yf_only = ['^VIX', 'BTC-USD', 'GLD', 'TLT']
     while True:
         try:
-            whale = list({w['symbol'] for w in _whale_cache.get('combined',[])})[:20]
-            trade_syms = list({t['symbol'] for t in state['trades'].values()})
-            syms = list(dict.fromkeys(base_syms + whale + trade_syms))
-            result = {}
+            whale_syms = [w['symbol'] for w in _whale_cache.get('combined',[])
+                          if re.match(r'^[A-Z]{1,5}$', w.get('symbol',''))][:20]
+            trade_syms = [t['symbol'] for t in state['trades'].values()
+                          if re.match(r'^[A-Z]{1,5}$', t.get('symbol',''))]
+            stock_syms = list(dict.fromkeys(base_stocks + whale_syms + trade_syms))
+
+            # ── Fetch stocks (Alpaca if available, else yfinance) ──────
             if alpaca_data:
                 try:
-                    req = StockLatestTradeRequest(symbol_or_symbols=syms)
+                    req    = StockLatestTradeRequest(symbol_or_symbols=stock_syms)
                     trades = alpaca_data.get_stock_latest_trade(req)
                     with _price_lock:
                         for sym, t in trades.items():
-                            p = float(t.price)
-                            old = _price_cache.get(sym,{}).get('price',p)
-                            pct = ((p-old)/old*100) if old else 0
-                            result[sym]={'price':p,'pct':pct,'ts':time.time(),'src':'live'}
-                        _price_cache.update(result); _price_ts=time.time()
-                    time.sleep(2); continue
-                except: pass
-            # yfinance fallback
+                            p   = float(t.price)
+                            old = _price_cache.get(sym,{}).get('price', p)
+                            pct = round((p-old)/old*100, 3) if old else 0
+                            _price_cache[sym] = {'price':p,'pct':pct,'ts':time.time(),'src':'live'}
+                    _price_ts = time.time()
+                except Exception as e:
+                    print(f"Alpaca price: {e}")
+            else:
+                # yfinance for stocks
+                try:
+                    df   = yf.download(stock_syms[:30], period='5d', interval='1d',
+                                       auto_adjust=True, progress=False)
+                    multi = isinstance(df.columns, pd.MultiIndex)
+                    with _price_lock:
+                        for sym in stock_syms:
+                            try:
+                                cl  = (df['Close'][sym] if multi else df['Close']).dropna()
+                                if not len(cl): continue
+                                p   = float(cl.iloc[-1])
+                                prv = float(cl.iloc[-2]) if len(cl)>=2 else p
+                                _price_cache[sym] = {'price':round(p,2),'pct':round((p-prv)/prv*100,3),'ts':time.time(),'src':'delayed'}
+                            except: pass
+                    _price_ts = time.time()
+                except Exception as e:
+                    print(f"yf stocks: {e}")
+
+            # ── Always fetch VIX + BTC via yfinance (Alpaca doesn't carry these) ──
             try:
-                df = yf.download(syms[:30],period='2d',interval='1d',auto_adjust=True,progress=False)
-                multi = isinstance(df.columns,pd.MultiIndex)
+                yf_df = yf.download(yf_only, period='5d', interval='1d',
+                                    auto_adjust=True, progress=False)
+                yf_multi = isinstance(yf_df.columns, pd.MultiIndex)
+                display_map = {'^VIX':'VIX', 'BTC-USD':'BTC', 'GLD':'GLD', 'TLT':'TLT'}
                 with _price_lock:
-                    for sym in syms:
+                    for raw_sym in yf_only:
                         try:
-                            cl=(df['Close'][sym] if multi else df['Close']).dropna()
-                            if len(cl)<1: continue
-                            p=float(cl.iloc[-1]); prev=float(cl.iloc[-2]) if len(cl)>=2 else p
-                            _price_cache[sym]={'price':round(p,2),'pct':round((p-prev)/prev*100,3),'ts':time.time(),'src':'delayed'}
+                            cl  = (yf_df['Close'][raw_sym] if yf_multi else yf_df['Close']).dropna()
+                            if not len(cl): continue
+                            p   = float(cl.iloc[-1])
+                            prv = float(cl.iloc[-2]) if len(cl)>=2 else p
+                            disp = display_map.get(raw_sym, raw_sym)
+                            entry = {'price':round(p,2),'pct':round((p-prv)/prv*100,3),'ts':time.time(),'src':'delayed','display':disp}
+                            _price_cache[raw_sym] = entry
+                            _price_cache[disp]    = entry   # also store under display name
                         except: pass
-                _price_ts=time.time()
-            except: pass
-        except Exception as e: print(f"Price thread: {e}")
+            except Exception as e:
+                print(f"yf VIX/BTC: {e}")
+
+        except Exception as e:
+            print(f"Price thread: {e}")
         time.sleep(30)
 
 def cp(sym):
@@ -514,20 +547,49 @@ def all_prices():
     with _price_lock: return dict(_price_cache)
 
 def get_candles(sym, period='1d', interval='5m'):
-    try:
-        df = yf.download(sym, period=period, interval=interval, auto_adjust=True, progress=False)
-        if df.empty and interval=='5m':
-            df = yf.download(sym, period='5d', interval='15m', auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex): df.columns=df.columns.get_level_values(0)
-        return df.dropna()
-    except: return pd.DataFrame()
+    """
+    Smart candle fetch with full after-hours fallback.
+    After market close, intraday data is stale — automatically widens timeframe.
+    """
+    # Map display names back to yfinance format
+    sym_map = {'VIX':'^VIX', 'BTC':'BTC-USD'}
+    yf_sym  = sym_map.get(sym, sym)
+
+    # Fallback chain: try requested, then progressively wider intervals
+    attempts = [(period, interval)]
+    if interval in ('1m','2m','5m'):
+        attempts += [('5d','15m'), ('1mo','1h'), ('3mo','1d')]
+    elif interval in ('15m','30m','60m','1h'):
+        attempts += [('1mo','1h'), ('3mo','1d'), ('1y','1wk')]
+    elif interval == '1d':
+        attempts += [('3mo','1d'), ('1y','1wk')]
+
+    for p, iv in attempts:
+        try:
+            df = yf.download(yf_sym, period=p, interval=iv,
+                             auto_adjust=True, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df = df.dropna()
+            if not df.empty and len(df) >= 5:
+                return df
+        except Exception as e:
+            print(f"  candles {yf_sym} {p}/{iv}: {e}")
+            continue
+    return pd.DataFrame()
+
 
 def compute_technicals(sym, df=None):
-    """Full technical suite: VWAP, EMA, RSI, MACD, BB, ATR, support/resistance"""
-    if df is None: df = get_candles(sym)
-    if df.empty or len(df)<10:
-        df = get_candles(sym,'5d','15m')
-    if df.empty or len(df)<5: return None
+    """Full technical suite with after-hours safe fallback"""
+    if df is None:
+        # Try intraday first, fall back to daily if empty
+        df = get_candles(sym, '1d', '5m')
+        if df.empty or len(df) < 10:
+            df = get_candles(sym, '5d', '15m')
+        if df.empty or len(df) < 10:
+            df = get_candles(sym, '3mo', '1d')   # always works — daily historical
+    if df.empty or len(df) < 5:
+        return None
     c=df['Close']; h=df['High']; l=df['Low']; v=df['Volume']
     # VWAP
     typical=(h+l+c)/3; cum_vol=v.cumsum().replace(0,1)
@@ -1029,7 +1091,11 @@ def whale_refresh():
 
 @app.route('/prices')
 def prices_route():
-    p=all_prices()
+    p = all_prices()
+    # Ensure VIX and BTC always present under display names
+    for raw, disp in [('^VIX','VIX'),('BTC-USD','BTC')]:
+        if disp not in p and raw in p:
+            p[disp] = dict(p[raw])
     return _cors({'data':p,'src':'live' if alpaca_data else 'delayed','ts':_price_ts})
 
 @app.route('/technicals')
@@ -1041,25 +1107,31 @@ def technicals():
 
 @app.route('/candles')
 def candles():
-    sym=request.args.get('symbol','').upper()
-    period=request.args.get('period','1d')
-    interval=request.args.get('interval','5m')
+    sym      = request.args.get('symbol','').upper()
+    period   = request.args.get('period','1d')
+    interval = request.args.get('interval','5m')
     if not sym: return _cors({'bars':[]})
     try:
-        df=get_candles(sym,period,interval)
-        if df.empty: return _cors({'bars':[],'symbol':sym})
-        if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.get_level_values(0)
-        df=df.dropna().tail(100)
-        bars=[]
-        for i,r in df.iterrows():
+        df = get_candles(sym, period, interval)
+        if df.empty:
+            return _cors({'bars':[],'symbol':sym,'note':'No data — try 5D or 1M timeframe'})
+        if isinstance(df.columns, pd.MultiIndex): df.columns=df.columns.get_level_values(0)
+        df = df.dropna().tail(120)
+        bars = []
+        for i, r in df.iterrows():
             try:
-                idx_et=i.tz_convert(ET_TZ) if hasattr(i,'tzinfo') and i.tzinfo else i
-                hm=str(idx_et)[11:16] if ' ' in str(idx_et) else str(idx_et)[-8:-3]
-            except: hm=str(i)[11:16]
-            bars.append({'t':str(i),'hm':hm,'o':round(float(r.Open),3),'h':round(float(r.High),3),
-                         'l':round(float(r.Low),3),'c':round(float(r.Close),3),'v':int(r.Volume)})
-        return _cors({'bars':bars,'symbol':sym})
-    except Exception as e: return _cors({'bars':[],'error':str(e)})
+                idx_et = i.tz_convert(ET_TZ) if hasattr(i,'tzinfo') and i.tzinfo else i
+                ts = str(idx_et)
+                hm = ts[11:16] if len(ts)>11 else ts[:10]
+            except:
+                hm = str(i)[:16]
+            bars.append({'t':str(i),'hm':hm,
+                         'o':round(float(r['Open']),3),'h':round(float(r['High']),3),
+                         'l':round(float(r['Low']),3),'c':round(float(r['Close']),3),
+                         'v':int(r['Volume']) if 'Volume' in r.index else 0})
+        return _cors({'bars':bars,'symbol':sym,'period':period,'interval':interval,'count':len(bars)})
+    except Exception as e:
+        return _cors({'bars':[],'error':str(e),'symbol':sym})
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -1067,15 +1139,48 @@ def analyze():
     sym=d.get('symbol','').upper()
     if not sym: return _cors({'ok':False})
     def do():
-        tech=compute_technicals(sym)
-        whale=next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym),None)
-        rec=whale_score_and_recommend(sym,tech,whale) if tech else {}
-        analysis,ai_src=ai_analyze(sym,tech,whale)
-        state.setdefault('analysis_cache',{})[sym]={
-            'tech':tech,'whale':whale,'rec':rec,
-            'analysis':analysis,'ai_src':ai_src,'ts':now_str(),'symbol':sym
-        }
-    threading.Thread(target=do,daemon=True).start()
+        try:
+            # compute_technicals now always falls back to daily data — should never hang
+            tech = compute_technicals(sym)
+            if tech is None:
+                # Last resort: just get current price and build minimal tech
+                cached = cp(sym)
+                if cached:
+                    p = cached['price']
+                    tech = {
+                        'signal':'WAIT','signal_reason':'Limited data — market closed or new ticker',
+                        'price':p,'change_pct':cached.get('pct',0),
+                        'rsi':50,'vwap':p,'above_vwap':True,'macd_bull':False,
+                        'ema9':p,'ema20':p,'ema50':p,'bb_upper':p*1.05,'bb_lower':p*.95,'bb_mid':p,
+                        'atr':p*.015,'support':round(p*.94,2),'resistance':round(p*1.06,2),
+                        'stop_day':round(p*.94,2),'target_day':round(p*1.08,2),
+                        'stop_swing':round(p*.92,2),'target_swing':round(p*1.18,2),
+                        'stop_lt':round(p*.88,2),'target_lt':round(p*1.40,2),
+                        'pred_5d':round(p*1.02,2),'pred_30d':round(p*1.06,2),'pred_90d':round(p*1.15,2),
+                        'trend':'unknown','best_mode':'swing','daily_vol':2.0,
+                        'near_support':False,'near_resistance':False,'bull_pts':0,'bull_ema':False,
+                        'rsi_oversold':False,'rsi_overbought':False,'slope':0,
+                        'vwap_series':[],'ema9_series':[],'ema20_series':[],'ema50_series':[],
+                        'bb_upper_series':[],'bb_lower_series':[],'close_series':[],'pred_series':[]
+                    }
+            whale  = next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym), None)
+            rec    = whale_score_and_recommend(sym, tech, whale) if tech else {}
+            # Store partial result NOW so frontend stops spinning while AI runs
+            state.setdefault('analysis_cache',{})[sym] = {
+                'tech':tech,'whale':whale,'rec':rec,
+                'analysis':None,'ai_src':'pending','ts':now_str(),'symbol':sym
+            }
+            # Now run AI (slower — runs after partial result saved)
+            analysis, ai_src = ai_analyze(sym, tech, whale)
+            state['analysis_cache'][sym].update({'analysis':analysis,'ai_src':ai_src})
+        except Exception as e:
+            print(f"Analyze {sym}: {e}")
+            # Store error state so frontend shows something instead of spinning
+            state.setdefault('analysis_cache',{})[sym] = {
+                'tech':None,'whale':None,'rec':{},'symbol':sym,
+                'analysis':f'Analysis error: {str(e)[:100]}','ai_src':'error','ts':now_str()
+            }
+    threading.Thread(target=do, daemon=True).start()
     return _cors({'ok':True,'msg':f'Analyzing {sym}...'})
 
 @app.route('/analysis-result')

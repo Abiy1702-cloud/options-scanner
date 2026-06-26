@@ -366,7 +366,7 @@ canvas.main-chart{width:100%;display:block}
   <div class="mkt-strip">
     <div class="mkt-cell"><div class="mc-sym">SPY</div><div class="mc-price" id="p-spy" style="color:var(--live)">—</div><div class="mc-chg" id="c-spy">—</div></div>
     <div class="mkt-cell"><div class="mc-sym">QQQ</div><div class="mc-price" id="p-qqq" style="color:var(--live)">—</div><div class="mc-chg" id="c-qqq">—</div></div>
-    <div class="mkt-cell"><div class="mc-sym">VIX</div><div class="mc-price" id="p-vix" style="color:var(--warn)">—</div><div class="mc-chg" id="c-vix">—</div></div>
+    <div class="mkt-cell"><div class="mc-sym" title="Fear Index: &lt;15=calm, 20+=fear, 30+=panic">VIX 😨</div><div class="mc-price" id="p-vix" style="color:var(--warn)">—</div><div class="mc-chg" id="c-vix" style="font-size:8px;color:var(--t3)">fear idx</div></div>
     <div class="mkt-cell"><div class="mc-sym">BTC</div><div class="mc-price" id="p-btc" style="color:var(--purple)">—</div><div class="mc-chg" id="c-btc">—</div></div>
   </div>
 
@@ -726,8 +726,24 @@ async function refreshPrices() {
     }
     setCell('SPY','p-spy','c-spy','p-spy2','c-spy2');
     setCell('QQQ','p-qqq','c-qqq','p-qqq2','c-qqq2');
-    setCell('VIX','p-vix','c-vix','p-vix2','c-vix2');
-    setCell('BTC-USD','p-btc','c-btc');
+    // VIX: stored under 'VIX' display name
+    const vix=p['VIX']||p['^VIX'];
+    if(vix){
+      const ve=$('p-vix'),vc=$('c-vix'),ve2=$('p-vix2'),vc2=$('c-vix2');
+      const vclr=vix.price>30?'var(--sell)':vix.price>20?'var(--warn)':'var(--buy)';
+      if(ve){ve.textContent=vix.price.toFixed(2);ve.style.color=vclr;}
+      if(vc){vc.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';vc.style.color=vclr;}
+      if(ve2){ve2.textContent=vix.price.toFixed(2);ve2.style.color=vclr;}
+      if(vc2){vc2.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';vc2.style.color=vclr;}
+    }
+    // BTC: stored under 'BTC' display name
+    const btc=p['BTC']||p['BTC-USD'];
+    if(btc){
+      const be=$('p-btc'),bc=$('c-btc');
+      const bclr=btc.pct>=0?'var(--buy)':'var(--sell)';
+      if(be){be.textContent='$'+Number(btc.price).toLocaleString(undefined,{maximumFractionDigits:0});be.style.color=bclr;}
+      if(bc){bc.textContent=(btc.pct>=0?'+':'')+btc.pct.toFixed(2)+'%';bc.style.color=bclr;}
+    }
   } catch(e){}
 }
 refreshPrices(); setInterval(refreshPrices,3000);
@@ -1007,8 +1023,22 @@ async function runResearch() {
     researchPoll=setInterval(async()=>{
       tries++;
       const d=await(await api('/analysis-result?symbol='+sym)).json();
-      if(d.ready&&d.result){ clearInterval(researchPoll); renderResearch(d.result); }
-      if(tries>40){ clearInterval(researchPoll); $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">Analysis timed out — try again</div></div>'; }
+      // Show as soon as tech data is ready — even if AI is still running
+      if(d.ready&&d.result&&d.result.tech){
+        clearInterval(researchPoll);
+        renderResearch(d.result);
+        // If AI was still pending, poll once more to update
+        if(!d.result.analysis||d.result.ai_src==='pending'){
+          setTimeout(async()=>{
+            const d2=await(await api('/analysis-result?symbol='+sym)).json();
+            if(d2.result&&d2.result.analysis&&d2.result.ai_src!=='pending'){
+              const aiBox=document.querySelector('.ai-analysis');
+              if(aiBox) aiBox.textContent=d2.result.analysis;
+            }
+          }, 8000);
+        }
+      }
+      if(tries>25){ clearInterval(researchPoll); $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">Timed out — check server logs, then try again</div></div>'; }
     },2000);
   } catch(e){ toast('Research failed','err'); }
 }
@@ -1114,13 +1144,47 @@ async function setResTF(period,interval,el) {
   el.classList.add('on'); resTF={period,interval};
   if(currentResSym) await loadResChart(currentResSym,period,interval,resTech);
 }
-async function loadResChart(sym,period,interval,tech) {
-  resTech=tech;
+async function loadResChart(sym, period, interval, tech) {
+  resTech = tech;
+  const canvas = $('res-chart');
+  if(!canvas) return;
+  // Show loading
+  const dpr=window.devicePixelRatio||1, W=canvas.clientWidth||360;
+  canvas.width=W*dpr; canvas.height=220*dpr;
+  canvas.style.width=W+'px'; canvas.style.height='220px';
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,220);
+  ctx.fillStyle='#3d5a72'; ctx.font='11px Inter'; ctx.fillText('Loading chart...',W/2-40,110);
   try {
-    const cd=await(await api(`/candles?symbol=${sym}&period=${period}&interval=${interval}`)).json();
-    const canvas=$('res-chart'); if(!canvas) return;
-    drawChart(canvas,cd.bars||[],tech,220,true,null);
-  } catch(e){}
+    const cd = await(await api(`/candles?symbol=${sym}&period=${period}&interval=${interval}`)).json();
+    if(cd.bars && cd.bars.length >= 5) {
+      drawChart(canvas, cd.bars, tech, 220, true, null);
+      return;
+    }
+    // Auto-fallback: try 3-month daily (always works after hours)
+    const fallbacks = [['5d','15m'],['1mo','1h'],['3mo','1d']];
+    for(const [fp,fi] of fallbacks) {
+      if(fp===period&&fi===interval) continue;
+      const fd = await(await api(`/candles?symbol=${sym}&period=${fp}&interval=${fi}`)).json();
+      if(fd.bars && fd.bars.length >= 5) {
+        drawChart(canvas, fd.bars, tech, 220, true, null);
+        const old=document.getElementById('chart-ah-note');if(old)old.remove();
+        const note=document.createElement('div');note.id='chart-ah-note';
+        note.style.cssText='font-size:8px;color:var(--warn);font-family:var(--ui);text-align:center;padding:2px 0';
+        note.textContent=`⚠ After hours — showing ${fp} / ${fi} chart (${fd.bars.length} bars)`;
+        canvas.insertAdjacentElement('afterend', note);
+        setTimeout(()=>note.remove(), 10000);
+        return;
+      }
+    }
+    ctx.clearRect(0,0,W,220);
+    ctx.fillStyle='#ff3355'; ctx.font='11px Inter';
+    ctx.fillText('No chart data available', W/2-60, 110);
+  } catch(e) {
+    ctx.clearRect(0,0,W,220);
+    ctx.fillStyle='#ff3355'; ctx.font='11px Inter';
+    ctx.fillText('Chart error: '+e.message, 10, 110);
+  }
 }
 
 // ══════════════════════════════════════════════════════════
