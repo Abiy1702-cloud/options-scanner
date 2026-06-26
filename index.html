@@ -849,7 +849,7 @@ async function refreshScan() {
     $('scan-age').textContent = age<1?'Just refreshed':`${age.toFixed(0)}min ago`;
     renderScan();
     // Set master signal
-    const top = allWhales.find(w=>w.confidence>=75) || allWhales[0];
+    const top = allWhales.find(w=>(w.display_score||w.confidence||0)>=55) || allWhales[0];
     if(top) setMasterSignal(top);
   } catch(e){}
 }
@@ -887,7 +887,7 @@ function renderScan() {
   const body=$('scan-body');
   if(!allWhales.length){body.innerHTML='<div class="empty-state">No whale signals yet. Tap Scan Now.</div>';return;}
   body.innerHTML = allWhales.slice(0,8).map((w,i)=>{
-    const sig=w.top_signal||'WAIT'; const score=w.confidence||0;
+    const sig=w.top_signal||'WAIT'; const score=w.display_score||w.confidence||0;
     const sigCl=sig==='BUY'?'buy':sig==='SELL'?'sell':'wait';
     const sigColor=sig==='BUY'?'var(--buy)':sig==='SELL'?'var(--sell)':'var(--warn)';
     const srcs=Array.from(new Set(w.sources||[])).join(', ');
