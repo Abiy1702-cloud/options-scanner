@@ -1394,12 +1394,15 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   if(!canvas||!bars.length) return;
   const dpr=window.devicePixelRatio||1;
   const W=canvas.clientWidth||canvas.offsetWidth||360;
-  canvas.width=W*dpr; canvas.height=h*dpr;
-  canvas.style.width=W+'px'; canvas.style.height=h+'px';
+  // Volume panel is 18% of chart height, drawn below main chart
+  const volH   = Math.max(30, Math.floor(h * 0.18));
+  const totalH = h + volH;
+  canvas.width=W*dpr; canvas.height=totalH*dpr;
+  canvas.style.width=W+'px'; canvas.style.height=totalH+'px';
   const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,W,h);
+  ctx.clearRect(0,0,W,totalH);
 
-  const PL=2,PR=52,PT=8,PB=20, PW=W-PL-PR, PH=h-PT-PB;
+  const PL=4, PR=58, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
 
   // ── Y range: price only (keep indicators in view) ────────
   const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
