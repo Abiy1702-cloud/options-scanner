@@ -200,7 +200,8 @@ def ai_call(system_p, user_p, max_tokens=500):
 # ══════════════════════════════════════════════════════════════════════
 
 # Cache
-_whale_cache = {'sec4':[],'congress':[],'unusual':[],'ts':0}
+_whale_cache = {'sec4':[],'congress':[],'unusual':[],'combined':[],'ts':0}
+_whale_lock  = threading.Lock()
 _whale_lock  = threading.Lock()
 
 def get_rt_prices(syms):
@@ -506,7 +507,11 @@ def refresh_whale_data():
     print(f"  Whale engine: {len(combined)} symbols total (Alpaca + yfinance momentum)")
 
 def get_whale_data():
-    if not _whale_cache.get('ts') or time.time()-_whale_cache['ts']>1800:
+    is_empty = len(_whale_cache.get('combined', [])) == 0
+    is_stale = time.time() - _whale_cache.get('ts', 0) > 1800
+    if is_empty:
+        refresh_whale_data()  # synchronous on first call — must populate before returning
+    elif is_stale:
         threading.Thread(target=refresh_whale_data, daemon=True).start()
     return _whale_cache
 

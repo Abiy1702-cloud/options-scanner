@@ -845,8 +845,23 @@ async function refreshScan() {
   try {
     const d = await(await api('/whale-data')).json();
     allWhales = d.combined||[];
+    // If empty, trigger a scan automatically
+    if(!allWhales.length) {
+      $('scan-age').textContent = 'Scanning...';
+      try { await api('/whale-refresh',{method:'POST'}); } catch(e){}
+      setTimeout(refreshScan, 5000);
+      return;
+    }
     const age = d.age_min||0;
-    $('scan-age').textContent = age<1?'Just refreshed':`${age.toFixed(0)}min ago`;
+    if(!d.combined||!d.combined.length) {
+      $('scan-age').textContent = 'Scanning...';
+    } else if(age < 1) {
+      $('scan-age').textContent = 'Just refreshed';
+    } else if(age > 60) {
+      $('scan-age').textContent = 'Tap Scan Now';
+    } else {
+      $('scan-age').textContent = `${age.toFixed(0)}min ago`;
+    }
     renderScan();
     // Set master signal
     const top = allWhales.find(w=>(w.display_score||w.confidence||0)>=55) || allWhales[0];
