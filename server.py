@@ -1223,19 +1223,26 @@ def whale_data_route():
     prices=all_prices()
     for w in combined:
         sym=w['symbol']
-        # Live price
         q=prices.get(sym)
-        if q: w['price']=q['price']; w['pct']=q['pct']
-        else: w.setdefault('price',None); w.setdefault('pct',None)
-        # Inject live price change into whale item so scoring can use it
+        if q:
+            w['price'] = round(q['price'],2)
+            # Only show pct if it's from a live source or genuinely non-zero
+            pct = q.get('pct',0) or 0
+            src = q.get('src','')
+            # Hide stale 0.0% — show dash instead of misleading green +0.0%
+            if pct == 0 and src not in ('alpaca_snapshot','live'):
+                w['pct'] = None
+            else:
+                w['pct'] = round(pct,2)
+        else:
+            w.setdefault('price',None)
+            w.setdefault('pct',None)
         if q and q.get('pct') is not None:
-            w['live_pct'] = q['pct']
-        # Get cached tech — use it to compute a REAL differentiated score
+            w['live_pct'] = q.get('pct',0)
         cached_tech = state.get('analysis_cache',{}).get(sym,{}).get('tech')
         if cached_tech:
             w['top_signal']  = cached_tech.get('signal','WAIT')
             w['top_reason']  = cached_tech.get('signal_reason','')
-            # Build a minimal tech-like dict with live pct for scoring
             tech_for_score = dict(cached_tech)
             if q: tech_for_score['change_pct'] = q.get('pct',0)
             rec = whale_score_and_recommend(sym, tech_for_score, w)
@@ -1244,20 +1251,13 @@ def whale_data_route():
         else:
             w.setdefault('top_signal','WAIT')
             w.setdefault('top_reason','; '.join((w.get('reasons') or [])[:2]))
-            # No tech data — score from source confidence + price change only
             base = w.get('confidence', 60)
-            pct  = (q.get('pct',0) if q else 0)
-            if   pct >  5: adj = +8
-            elif pct >  2: adj = +4
-            elif pct >  0: adj = +1
-            elif pct < -5: adj = -15
-            elif pct < -2: adj = -8
-            elif pct <  0: adj = -3
-            else:          adj = 0
-            w['display_score'] = max(5, min(99, base + adj))
+            pct  = q.get('pct',0) if q else 0
+            adj  = 12 if pct>8 else 8 if pct>5 else 4 if pct>2 else 1 if pct>0 \
+                   else -15 if pct<-5 else -8 if pct<-2 else -3 if pct<0 else 0
+            w['display_score'] = max(5, min(99, base+adj))
             w.setdefault('rec_mode','swing')
-    # Sort by display_score descending
-    combined.sort(key=lambda x: x.get('display_score', x.get('confidence',0)), reverse=True)
+    combined.sort(key=lambda x:x.get('display_score',x.get('confidence',0)),reverse=True)
     return _cors({'combined':combined,
                   'sec4':d.get('sec4',[]),'congress':d.get('congress',[]),
                   'unusual':d.get('unusual',[]),'ts':d.get('ts',0),

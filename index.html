@@ -500,7 +500,7 @@ canvas.main-chart{width:100%;display:block}
   <div class="mkt-strip">
     <div class="mkt-cell"><div class="mc-sym">SPY</div><div class="mc-price" id="p-spy2" style="color:var(--live)">—</div><div class="mc-chg" id="c-spy2">—</div></div>
     <div class="mkt-cell"><div class="mc-sym">QQQ</div><div class="mc-price" id="p-qqq2" style="color:var(--live)">—</div><div class="mc-chg" id="c-qqq2">—</div></div>
-    <div class="mkt-cell"><div class="mc-sym">VIX</div><div class="mc-price" id="p-vix2" style="color:var(--warn)">—</div><div class="mc-chg" id="c-vix2">—</div></div>
+    <div class="mkt-cell"><div class="mc-sym" title="Fear Index">VIX 😨</div><div class="mc-price" id="p-vix2" style="color:var(--warn)">—</div><div class="mc-chg" id="c-vix2" style="font-size:8px">—</div></div>
     <div class="mkt-cell" style="font-family:var(--bc);font-size:9px;padding:6px 7px;color:var(--t3)">
       <div class="mc-sym">SLOTS</div>
       <div class="mc-price" id="opt-slots" style="color:var(--purple)">0/5</div>
@@ -1443,7 +1443,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,totalH);
 
-  const PL=4, PR=72, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
+  const PL=4, PR=80, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
 
   // ── Y range: price only (keep indicators in view) ────────
   const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
@@ -1572,9 +1572,9 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   };
   if(tech){
     line(tech.vwap_series, '#ffb020',2.0,[],'VWAP','#ffb020',true);
-    line(tech.ema9_series, '#00d4ff',1.4,[],'9','#00d4ff');
-    line(tech.ema20_series,'#7a9ab5',1.0,[],'20','#7a9ab5');
-    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'50','#b366ff');
+    line(tech.ema9_series, '#00d4ff',1.4,[],'EMA9','#00d4ff');
+    line(tech.ema20_series,'#7a9ab5',1.0,[],'EMA20','#7a9ab5');
+    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'EMA50','#b366ff');
   }
   // Queue support/resistance labels too
   if(tech&&tech.support&&isFinite(tech.support))    addRLabel(fy(tech.support),'SUP $'+tech.support.toFixed(2),'#00ff88',true);
