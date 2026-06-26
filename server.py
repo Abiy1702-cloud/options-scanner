@@ -273,6 +273,13 @@ def _valid_sym(sym):
     if not re.match(r'^[A-Z]{1,5}$', sym): return False
     return True
 
+def _valid_whale_pick(sym, price):
+    """Extra filter for whale picks — exclude penny stocks and garbage"""
+    if not _valid_sym(sym): return False
+    if price is not None and price < 0.5: return False   # penny stocks < $0.50
+    if price is not None and price > 50000: return False # unreasonably high
+    return True
+
 # ════════════════════════════════════════════════════════════════════
 # WHALE DATA ENGINE — Alpaca Screener + News + yfinance Momentum
 # All sources confirmed to work on Render with Alpaca credentials
@@ -1257,6 +1264,8 @@ def whale_data_route():
                    else -15 if pct<-5 else -8 if pct<-2 else -3 if pct<0 else 0
             w['display_score'] = max(5, min(99, base+adj))
             w.setdefault('rec_mode','swing')
+    # Filter out penny stocks and garbage before sorting
+    combined = [w for w in combined if _valid_whale_pick(w.get('symbol',''), w.get('price'))]
     combined.sort(key=lambda x:x.get('display_score',x.get('confidence',0)),reverse=True)
     return _cors({'combined':combined,
                   'sec4':d.get('sec4',[]),'congress':d.get('congress',[]),
