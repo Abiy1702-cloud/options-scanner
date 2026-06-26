@@ -277,9 +277,9 @@ def _valid_sym(sym):
     return True
 
 def _valid_whale_pick(sym, price):
-    """Extra filter for whale picks — exclude penny stocks and garbage"""
+    """Extra filter for whale picks — exclude penny stocks and micro-caps"""
     if not _valid_sym(sym): return False
-    if price is not None and price < 1.0: return False   # nothing under $1
+    if price is not None and price < 5.0: return False   # nothing under $5
     if price is not None and price > 50000: return False
     return True
 

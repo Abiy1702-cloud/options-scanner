@@ -1773,7 +1773,11 @@ async function toggleOptChart(sym) {
   const open = wrap.style.display==='none' || wrap.style.display==='';
   wrap.style.display = open ? 'block' : 'none';
   if(btn) btn.textContent = open ? '▲ Hide Chart' : '📊 Chart + Details';
-  if(open) await loadOptChart(sym,'1d','5m',null);
+  if(open) {
+    // Wait one animation frame for browser to reflow and give canvas real width
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    await loadOptChart(sym,'1d','5m',null);
+  }
 }
 
 async function loadOptChart(sym, period, interval, btn) {
@@ -1784,14 +1788,17 @@ async function loadOptChart(sym, period, interval, btn) {
   }
   const canvas=document.getElementById('opc-canvas-'+sym);
   if(!canvas) return;
-  // Loading state
-  const dpr=window.devicePixelRatio||1,W=canvas.clientWidth||360;
-  canvas.width=W*dpr;canvas.height=160*dpr;
-  canvas.style.width=W+'px';canvas.style.height='160px';
-  const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);
-  ctx.fillStyle='#0c1520';ctx.fillRect(0,0,W,160);
-  ctx.fillStyle='#3d5a72';ctx.font='11px Inter';
-  ctx.fillText('Loading '+sym+'...',W/2-40,80);
+  // Get real width — try canvas, then parent, then fallback
+  const W = canvas.clientWidth || canvas.parentElement?.clientWidth ||
+            canvas.closest('[id^="opc-chart"]')?.clientWidth || 760;
+  const H = 180;
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
+  ctx.fillStyle='#0c1520'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#3d5a72'; ctx.font='11px Inter';
+  ctx.fillText('Loading '+sym+'...',W/2-40,H/2);
   try {
     const [cd,td]=await Promise.all([
       api('/candles?symbol='+sym+'&period='+period+'&interval='+interval).then(r=>r.json()),
@@ -1799,16 +1806,15 @@ async function loadOptChart(sym, period, interval, btn) {
     ]);
     const bars=cd.bars||[];
     if(!bars.length) {
-      // fallback to daily
       const fb=await api('/candles?symbol='+sym+'&period=3mo&interval=1d').then(r=>r.json());
-      drawChart(canvas,fb.bars||[],td.technicals,160,true,null);
+      drawChart(canvas,fb.bars||[],td.technicals,H,true,null);
     } else {
-      drawChart(canvas,bars,td.technicals,160,true,null);
+      drawChart(canvas,bars,td.technicals,H,true,null);
     }
   } catch(e){
-    ctx.clearRect(0,0,W,160);
-    ctx.fillStyle='#ff3355';ctx.font='10px Inter';
-    ctx.fillText('Chart error',W/2-30,80);
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#ff3355'; ctx.font='10px Inter';
+    ctx.fillText('Chart error: '+e.message,10,H/2);
   }
 }
 
