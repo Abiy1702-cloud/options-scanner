@@ -342,6 +342,7 @@ canvas.main-chart{width:100%;display:block}
     <div class="hdr-sub">Whale Intelligence · Abiy Kassa</div>
   </div>
   <div class="hdr-r">
+    <span id="data-src-label" style="font-size:8px;font-family:var(--ui);color:var(--t3)">—</span>
     <span class="hdr-clk" id="clk">—</span>
     <span class="mkt-badge mb-closed" id="mpill">—</span>
     <span class="live-dot ld-off" id="ldot"></span>
@@ -714,33 +715,37 @@ async function refreshPrices() {
   try {
     const d = await(await api('/prices')).json();
     const p = d.data||{};
-    function setCell(sym,pid,cid,pid2,cid2) {
+    // Show live data source indicator
+    const src = d.src||'unknown';
+    const srcEl = $('data-src-label');
+    if(srcEl){
+      if(src==='alpaca_snapshot'){ srcEl.textContent='🟢 Alpaca Live'; srcEl.style.color='var(--buy)'; }
+      else if(src.includes('yfinance')){ srcEl.textContent='🟡 Yahoo Finance'; srcEl.style.color='var(--warn)'; }
+      else { srcEl.textContent='⚪ '+src; srcEl.style.color='var(--t3)'; }
+    }
+    function setPair(sym, p1, c1, p2, c2) {
       const q=p[sym]; if(!q) return;
-      const prStr = sym==='BTC-USD'?'$'+Number(q.price).toLocaleString(undefined,{maximumFractionDigits:0}):'$'+q.price.toFixed(2);
+      const isBig = sym==='BTC';
+      const prStr = isBig ? '$'+Number(q.price).toLocaleString(undefined,{maximumFractionDigits:0}) : '$'+q.price.toFixed(2);
       const clr = q.pct>=0?'var(--buy)':'var(--sell)';
-      const chgStr = (q.pct>=0?'+':'')+q.pct.toFixed(2)+'%';
-      if($(pid)){$(pid).textContent=prStr;$(pid).style.color=clr;}
-      if($(cid)){$(cid).textContent=chgStr;$(cid).style.color=clr;}
-      if(pid2&&$(pid2)){$(pid2).textContent=prStr;$(pid2).style.color=clr;}
-      if(cid2&&$(cid2)){$(cid2).textContent=chgStr;$(cid2).style.color=clr;}
+      const chg = (q.pct>=0?'+':'')+q.pct.toFixed(2)+'%';
+      [p1,p2].forEach(id=>{const e=$(id);if(e){e.textContent=prStr;e.style.color=clr;}});
+      [c1,c2].forEach(id=>{const e=$(id);if(e){e.textContent=chg;e.style.color=clr;}});
     }
-    setCell('SPY','p-spy','c-spy','p-spy2','c-spy2');
-    setCell('QQQ','p-qqq','c-qqq','p-qqq2','c-qqq2');
-    // VIX: stored under 'VIX' display name
-    const vix=p['VIX']||p['^VIX'];
+    setPair('SPY','p-spy','c-spy','p-spy2','c-spy2');
+    setPair('QQQ','p-qqq','c-qqq','p-qqq2','c-qqq2');
+    // VIX — fear index: green<15, amber 15-30, red>30
+    const vix = p['VIX']||p['^VIX'];
     if(vix){
-      const ve=$('p-vix'),vc=$('c-vix'),ve2=$('p-vix2'),vc2=$('c-vix2');
-      const vclr=vix.price>30?'var(--sell)':vix.price>20?'var(--warn)':'var(--buy)';
-      if(ve){ve.textContent=vix.price.toFixed(2);ve.style.color=vclr;}
-      if(vc){vc.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';vc.style.color=vclr;}
-      if(ve2){ve2.textContent=vix.price.toFixed(2);ve2.style.color=vclr;}
-      if(vc2){vc2.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';vc2.style.color=vclr;}
+      const vclr = vix.price>30?'var(--sell)':vix.price>20?'var(--warn)':'var(--buy)';
+      ['p-vix','p-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=vix.price.toFixed(2);e.style.color=vclr;}});
+      ['c-vix','c-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';e.style.color=vclr;}});
     }
-    // BTC: stored under 'BTC' display name
-    const btc=p['BTC']||p['BTC-USD'];
+    // BTC
+    const btc = p['BTC']||p['BTC-USD'];
     if(btc){
+      const bclr = btc.pct>=0?'var(--buy)':'var(--sell)';
       const be=$('p-btc'),bc=$('c-btc');
-      const bclr=btc.pct>=0?'var(--buy)':'var(--sell)';
       if(be){be.textContent='$'+Number(btc.price).toLocaleString(undefined,{maximumFractionDigits:0});be.style.color=bclr;}
       if(bc){bc.textContent=(btc.pct>=0?'+':'')+btc.pct.toFixed(2)+'%';bc.style.color=bclr;}
     }

@@ -28,18 +28,77 @@ PORT          = int(os.environ.get('PORT', 8765))
 ET_TZ         = pytz.timezone('America/New_York')
 UA            = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
-alpaca_trading = alpaca_data = None
+alpaca_trading = alpaca_data = alpaca_stream = None
+_alpaca_live_prices = {}  # populated by websocket stream during market hours
+
 if ALPACA_KEY and ALPACA_SECRET:
     try:
         from alpaca.trading.client import TradingClient
         from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.data.historical import StockHistoricalDataClient
-        from alpaca.data.requests import StockLatestTradeRequest
+        from alpaca.data.requests import (
+            StockLatestTradeRequest, StockLatestQuoteRequest,
+            StockSnapshotRequest, StockBarsRequest
+        )
+        from alpaca.data.timeframe import TimeFrame
         alpaca_trading = TradingClient(ALPACA_KEY, ALPACA_SECRET, paper=True)
         alpaca_data    = StockHistoricalDataClient(ALPACA_KEY, ALPACA_SECRET)
         print("Alpaca ✅")
-    except Exception as e: print(f"Alpaca: {e}")
+    except Exception as e:
+        print(f"Alpaca init: {e}")
+
+def alpaca_snapshot_prices(syms):
+    """
+    Use Alpaca snapshot API — works during AND after market hours.
+    Returns latest trade + quote + daily bar for each symbol.
+    Much more reliable than StockLatestTrade which only works during IEX hours.
+    """
+    if not alpaca_data or not syms:
+        return {}
+    result = {}
+    # Process in batches of 20 (API limit)
+    batch = [s for s in syms if re.match(r'^[A-Z]{1,5}$', s)][:40]
+    try:
+        req  = StockSnapshotRequest(symbol_or_symbols=batch)
+        snaps = alpaca_data.get_stock_snapshot(req)
+        for sym, snap in snaps.items():
+            try:
+                # latest_trade is most current price (during hours)
+                # daily_bar.close is last close (always available)
+                price = None
+                pct   = 0.0
+                if snap.latest_trade and snap.latest_trade.price:
+                    price = float(snap.latest_trade.price)
+                if price is None and snap.daily_bar:
+                    price = float(snap.daily_bar.close)
+                if price is None:
+                    continue
+                # % change vs previous close
+                if snap.previous_daily_bar and snap.previous_daily_bar.close:
+                    prev  = float(snap.previous_daily_bar.close)
+                    pct   = round((price - prev) / prev * 100, 3) if prev else 0
+                elif snap.daily_bar and snap.daily_bar.open:
+                    prev  = float(snap.daily_bar.open)
+                    pct   = round((price - prev) / prev * 100, 3) if prev else 0
+                # Bid/ask spread for quality check
+                bid = ask = None
+                if snap.latest_quote:
+                    bid = snap.latest_quote.bid_price
+                    ask = snap.latest_quote.ask_price
+                result[sym] = {
+                    'price': round(price, 2),
+                    'pct':   pct,
+                    'bid':   round(float(bid), 2) if bid else None,
+                    'ask':   round(float(ask), 2) if ask else None,
+                    'src':   'alpaca_snapshot',
+                    'ts':    time.time()
+                }
+            except Exception as e:
+                print(f"  snap {sym}: {e}")
+    except Exception as e:
+        print(f"Alpaca snapshot: {e}")
+    return result
 
 app = Flask(__name__, static_folder='.')
 
@@ -468,12 +527,21 @@ _price_ts    = 0
 _price_lock  = threading.Lock()
 
 def price_thread():
+    """
+    Price update loop.
+    Primary:  Alpaca snapshot API (works 24/7, includes pre/after-hours close)
+    Fallback: yfinance with prepost=True (catches after-hours moves)
+    VIX/BTC:  always yfinance (Alpaca doesn't carry indices/crypto)
+    Sleep:    5s market hours | 30s pre/after hours | 120s overnight/weekend
+    """
     global _price_ts
-    # Stock symbols (Alpaca-compatible)
-    base_stocks = ['SPY','QQQ','NVDA','TSLA','AAPL','MSFT','AMZN','META','GOOGL',
-                   'SOXL','TQQQ','MSTR','COIN','AMD','PLTR','MU','SMCI','DRAM']
-    # These need yfinance always — not available on Alpaca
-    yf_only = ['^VIX', 'BTC-USD', 'GLD', 'TLT']
+    base_stocks = [
+        'SPY','QQQ','NVDA','TSLA','AAPL','MSFT','AMZN','META','GOOGL',
+        'SOXL','TQQQ','MSTR','COIN','AMD','PLTR','MU','SMCI','DRAM',
+        'SOFI','RKLB','ASTS','IONQ','ARM','APP','AVGO','SMR'
+    ]
+    yf_special = {'^VIX':'VIX', 'BTC-USD':'BTC', 'GLD':'GLD'}
+
     while True:
         try:
             whale_syms = [w['symbol'] for w in _whale_cache.get('combined',[])
@@ -482,25 +550,23 @@ def price_thread():
                           if re.match(r'^[A-Z]{1,5}$', t.get('symbol',''))]
             stock_syms = list(dict.fromkeys(base_stocks + whale_syms + trade_syms))
 
-            # ── Fetch stocks (Alpaca if available, else yfinance) ──────
+            # ── PRIMARY: Alpaca Snapshot (24/7, pre+after hours included) ─────
+            alpaca_ok = False
             if alpaca_data:
-                try:
-                    req    = StockLatestTradeRequest(symbol_or_symbols=stock_syms)
-                    trades = alpaca_data.get_stock_latest_trade(req)
+                snaps = alpaca_snapshot_prices(stock_syms)
+                if snaps:
                     with _price_lock:
-                        for sym, t in trades.items():
-                            p   = float(t.price)
-                            old = _price_cache.get(sym,{}).get('price', p)
-                            pct = round((p-old)/old*100, 3) if old else 0
-                            _price_cache[sym] = {'price':p,'pct':pct,'ts':time.time(),'src':'live'}
-                    _price_ts = time.time()
-                except Exception as e:
-                    print(f"Alpaca price: {e}")
-            else:
-                # yfinance for stocks
+                        _price_cache.update(snaps)
+                        _price_ts = time.time()
+                    alpaca_ok = True
+
+            # ── FALLBACK: yfinance with prepost=True ──────────────────────────
+            if not alpaca_ok:
                 try:
-                    df   = yf.download(stock_syms[:30], period='5d', interval='1d',
-                                       auto_adjust=True, progress=False)
+                    df = yf.download(
+                        stock_syms[:25], period='5d', interval='1d',
+                        prepost=True, auto_adjust=True, progress=False
+                    )
                     multi = isinstance(df.columns, pd.MultiIndex)
                     with _price_lock:
                         for sym in stock_syms:
@@ -509,36 +575,51 @@ def price_thread():
                                 if not len(cl): continue
                                 p   = float(cl.iloc[-1])
                                 prv = float(cl.iloc[-2]) if len(cl)>=2 else p
-                                _price_cache[sym] = {'price':round(p,2),'pct':round((p-prv)/prv*100,3),'ts':time.time(),'src':'delayed'}
+                                _price_cache[sym] = {
+                                    'price': round(p,2),
+                                    'pct':   round((p-prv)/prv*100,3) if prv else 0,
+                                    'src':   'yfinance_prepost', 'ts': time.time()
+                                }
                             except: pass
-                    _price_ts = time.time()
+                        _price_ts = time.time()
                 except Exception as e:
-                    print(f"yf stocks: {e}")
+                    print(f"yf fallback: {e}")
 
-            # ── Always fetch VIX + BTC via yfinance (Alpaca doesn't carry these) ──
+            # ── ALWAYS: VIX + BTC via yfinance ───────────────────────────────
             try:
-                yf_df = yf.download(yf_only, period='5d', interval='1d',
-                                    auto_adjust=True, progress=False)
+                yf_df  = yf.download(
+                    list(yf_special.keys()), period='5d', interval='1d',
+                    prepost=True, auto_adjust=True, progress=False
+                )
                 yf_multi = isinstance(yf_df.columns, pd.MultiIndex)
-                display_map = {'^VIX':'VIX', 'BTC-USD':'BTC', 'GLD':'GLD', 'TLT':'TLT'}
                 with _price_lock:
-                    for raw_sym in yf_only:
+                    for raw, disp in yf_special.items():
                         try:
-                            cl  = (yf_df['Close'][raw_sym] if yf_multi else yf_df['Close']).dropna()
+                            cl  = (yf_df['Close'][raw] if yf_multi else yf_df['Close']).dropna()
                             if not len(cl): continue
                             p   = float(cl.iloc[-1])
                             prv = float(cl.iloc[-2]) if len(cl)>=2 else p
-                            disp = display_map.get(raw_sym, raw_sym)
-                            entry = {'price':round(p,2),'pct':round((p-prv)/prv*100,3),'ts':time.time(),'src':'delayed','display':disp}
-                            _price_cache[raw_sym] = entry
-                            _price_cache[disp]    = entry   # also store under display name
+                            entry = {
+                                'price': round(p,2),
+                                'pct':   round((p-prv)/prv*100,3) if prv else 0,
+                                'src':   'yfinance', 'ts': time.time(), 'display': disp
+                            }
+                            _price_cache[raw]  = entry
+                            _price_cache[disp] = entry
                         except: pass
             except Exception as e:
                 print(f"yf VIX/BTC: {e}")
 
         except Exception as e:
             print(f"Price thread: {e}")
-        time.sleep(30)
+
+        # Adaptive sleep
+        n = now_et(); t = n.hour*60 + n.minute
+        mkt_open  = n.weekday()<5 and 570<=t<960
+        pre_post  = n.weekday()<5 and (480<=t<570 or 960<=t<1200)
+        sleep_sec = 5 if mkt_open else (30 if pre_post else 120)
+        time.sleep(sleep_sec)
+
 
 def cp(sym):
     with _price_lock: return _price_cache.get(sym)
@@ -1058,6 +1139,46 @@ def job_keepalive():
 def index(): return send_from_directory('.','index.html')
 @app.route('/ping')
 def ping(): return _cors({'ok':True,'time':now_str(),'market':is_market_open()})
+
+@app.route('/data-status')
+def data_status():
+    """Shows exactly where prices are coming from right now"""
+    p = all_prices()
+    src_counts = {}
+    for sym, q in p.items():
+        s = q.get('src','unknown')
+        src_counts[s] = src_counts.get(s,0) + 1
+    n = now_et(); t = n.hour*60 + n.minute
+    mkt_open = n.weekday()<5 and 570<=t<960
+    pre_post = n.weekday()<5 and (480<=t<570 or 960<=t<1200)
+    session  = 'MARKET OPEN' if mkt_open else ('PRE/AFTER HOURS' if pre_post else 'CLOSED/WEEKEND')
+    # Check Alpaca account
+    acct_info = {}
+    if alpaca_trading:
+        try:
+            acct = alpaca_trading.get_account()
+            acct_info = {
+                'status': str(acct.status),
+                'buying_power': str(acct.buying_power),
+                'data_permissions': 'iex' # paper = IEX feed
+            }
+        except Exception as e:
+            acct_info = {'error': str(e)}
+    return _cors({
+        'session': session,
+        'alpaca_connected': alpaca_data is not None,
+        'alpaca_account': acct_info,
+        'price_sources': src_counts,
+        'prices_cached': len(p),
+        'cache_age_sec': round(time.time() - _price_ts, 0) if _price_ts else None,
+        'data_flow': {
+            'market_hours':  'Alpaca IEX snapshot (real-time ~0s delay)',
+            'pre_afterhours':'Alpaca snapshot last trade + yfinance prepost',
+            'closed_weekend':'yfinance last daily close (no intraday)',
+            'vix_btc':       'yfinance always (Alpaca does not carry indices/crypto)'
+        },
+        'note': 'Alpaca paper accounts use IEX feed — real-time during market hours only'
+    })
 
 @app.route('/whale-data')
 def whale_data_route():
