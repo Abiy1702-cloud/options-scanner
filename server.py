@@ -5,6 +5,18 @@ Sources: SEC Form 4, Congress Trades, Unusual Whales free, yfinance, Alpaca
 Modes: Day Trade | Swing Trade | Long Term — all auto-managed
 """
 import json, os, time, threading, urllib.request, urllib.parse, re, hashlib, concurrent.futures
+import math
+
+def _sanitize(obj, depth=0):
+    """Recursively replace NaN/Inf with None so JSON stays valid"""
+    if depth > 20: return obj
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else round(obj, 6)
+    if isinstance(obj, dict):
+        return {k: _sanitize(v, depth+1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v, depth+1) for v in obj]
+    return obj
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
@@ -133,7 +145,7 @@ def unlock():
 
 # ── HELPERS ───────────────────────────────────────────────────────────
 def _cors(d):
-    r = jsonify(d); r.headers['Access-Control-Allow-Origin']='*'; return r
+    r = jsonify(_sanitize(d)); r.headers['Access-Control-Allow-Origin']='*'; return r
 
 def now_et(): return datetime.now(ET_TZ)
 def now_str(): return now_et().strftime('%H:%M ET')
