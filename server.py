@@ -295,11 +295,15 @@ WATCHLIST = [
 ]
 
 def alpaca_get_screener(endpoint, top=25):
-    """Call Alpaca screener API — most actives, gainers, losers."""
+    """Call Alpaca screener API — most actives, gainers."""
     if not alpaca_data: return []
     items = []
     try:
-        url = f'https://data.alpaca.markets/v1beta1/screener/stocks/{endpoint}?by=volume&top={top}'
+        # most-actives requires ?by=volume, gainers/losers don't accept it
+        if endpoint == 'most-actives':
+            url = f'https://data.alpaca.markets/v1beta1/screener/stocks/most-actives?by=volume&top={top}'
+        else:
+            url = f'https://data.alpaca.markets/v1beta1/screener/stocks/{endpoint}?top={top}'
         req = urllib.request.Request(url, headers={
             'APCA-API-KEY-ID': ALPACA_KEY,
             'APCA-API-SECRET-KEY': ALPACA_SECRET,
@@ -314,10 +318,10 @@ def alpaca_get_screener(endpoint, top=25):
             chg = float(s.get('percent_change') or 0)
             vol = int(s.get('volume') or 0)
             price = float(s.get('trade') or s.get('price') or 0)
-            label = 'Most Active' if endpoint=='most-actives' else ('Top Gainer' if endpoint=='gainers' else 'Top Loser')
-            confidence = 72 if endpoint=='most-actives' else (68 if endpoint=='gainers' else 45)
+            label = 'Most Active' if endpoint=='most-actives' else 'Top Gainer'
+            confidence = 72 if endpoint=='most-actives' else 68
             hold = 3 if endpoint=='most-actives' else 7
-            if endpoint=='losers': continue  # skip losers for BUY signals
+            if endpoint=='losers': continue
             items.append({
                 'symbol':sym,'source':f'Alpaca {label}','direction':'buy',
                 'title':f'{label}: {sym} {chg:+.1f}% vol {vol:,}',
