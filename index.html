@@ -920,7 +920,10 @@ function renderScan() {
           ${w.pct!=null?`<div class="si-stat"><b style="color:${col(w.pct)}">${fmtP(w.pct)}</b></div>`:''}
           ${w.hold_days?`<div class="si-stat">Hold <b>${w.hold_days}d</b></div>`:''}
         </div>
-        <div style="font-size:8px;color:var(--t3);font-family:var(--ui);margin-top:2px">${(w.top_reason||'').slice(0,50)}</div>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--ui);margin-top:2px">${
+        // Show sources instead of stale screener reason which has wrong % 
+        Array.from(new Set(w.sources||[])).join(' · ')
+      }</div>
       </div>
       <div>
         <div class="si-score" style="color:${scCol(score)}">${score}</div>

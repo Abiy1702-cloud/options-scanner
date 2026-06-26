@@ -254,7 +254,10 @@ _NOT_TICKERS = {
     'AT','BE','BY','DO','GO','IF','IN','IS','IT','ME','MY','NO','OF',
     'ON','OR','SO','TO','UP','WE',
     # Specific known garbage that appeared in our logs
-    'NEXR','ILLR','DRAM_TECH',  # NEXR was a hallucination, ILLR unknown
+    'NEXR','ILLR','DRAM_TECH','GPUS',
+    # Inverse/bearish ETFs — these should NEVER be BUY signals
+    'SOXS','SPXS','TECS','SQQQ','SDOW','SPDN','UVXY','SVXY',
+    'DUST','JDST','LABD','YANG','EDZ','FAZ','SKF',
     # Drug/pharma trial abbreviations
     'FDA','EMA','NDA','BLA',
 }
@@ -1266,6 +1269,30 @@ def whale_data_route():
             w.setdefault('rec_mode','swing')
     # Filter out penny stocks and garbage before sorting
     combined = [w for w in combined if _valid_whale_pick(w.get('symbol',''), w.get('price'))]
+    # Fill missing prices via yfinance for any symbol Alpaca doesn't carry
+    missing = [w['symbol'] for w in combined if not w.get('price') and w.get('symbol')]
+    if missing:
+        try:
+            import yfinance as yf
+            df = yf.download(missing[:10], period='2d', interval='1d',
+                             auto_adjust=True, progress=False)
+            multi = isinstance(df.columns, pd.MultiIndex)
+            for sym in missing[:10]:
+                try:
+                    cl = (df['Close'][sym] if multi else df['Close']).dropna()
+                    if len(cl)<1: continue
+                    p   = float(cl.iloc[-1])
+                    prv = float(cl.iloc[-2]) if len(cl)>=2 else p
+                    pct = round((p-prv)/prv*100,2) if prv else 0
+                    _price_cache[sym] = {'price':round(p,2),'pct':pct,'src':'yfinance','ts':time.time()}
+                    for w in combined:
+                        if w['symbol']==sym:
+                            w['price'] = round(p,2)
+                            w['pct']   = pct
+                except: pass
+        except Exception as e:
+            print(f"  yfinance fallback for missing prices: {e}")
+
     combined.sort(key=lambda x:x.get('display_score',x.get('confidence',0)),reverse=True)
     return _cors({'combined':combined,
                   'sec4':d.get('sec4',[]),'congress':d.get('congress',[]),
