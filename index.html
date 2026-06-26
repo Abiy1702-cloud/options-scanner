@@ -589,7 +589,13 @@ canvas.main-chart{width:100%;display:block}
         <button class="tf-btn" onclick="setResTF('1y','1wk',this)">1Y</button>
         <button class="tf-btn" onclick="setResTF('2y','1wk',this)">2Y</button>
       </div>
-      <div class="chart-outer">
+      <div class="chart-outer" style="position:relative">
+        <!-- Zoom controls -->
+        <div id="res-zoom-controls" style="position:absolute;top:6px;left:8px;z-index:10;display:flex;gap:4px">
+          <button onclick="resZoom(1.3)" style="background:rgba(0,212,255,.15);border:1px solid rgba(0,212,255,.3);color:var(--live);border-radius:5px;width:26px;height:26px;font-size:14px;font-weight:700;cursor:pointer;line-height:1">+</button>
+          <button onclick="resZoom(0.77)" style="background:rgba(0,212,255,.15);border:1px solid rgba(0,212,255,.3);color:var(--live);border-radius:5px;width:26px;height:26px;font-size:14px;font-weight:700;cursor:pointer;line-height:1">−</button>
+          <button onclick="resZoomReset()" style="background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);color:var(--t2);border-radius:5px;padding:0 7px;height:26px;font-size:9px;font-weight:700;cursor:pointer;font-family:var(--ui)">RESET</button>
+        </div>
         <canvas id="res-chart" class="main-chart" style="height:260px"></canvas>
         <div class="chart-legend" style="flex-wrap:wrap;gap:6px 12px;padding:6px 8px">
           <div class="cl-item"><div class="cl-line" style="background:#ffb020;height:2px"></div><span style="color:#ffb020;font-weight:700">VWAP</span></div>
@@ -1313,6 +1319,7 @@ async function setResTF(period,interval,el) {
 }
 async function loadResChart(sym, period, interval, tech) {
   resTech = tech;
+  resZoomLevel = 1.0; resZoomOffset = 0;  // reset zoom on new ticker/timeframe
   const canvas = $('res-chart');
   if(!canvas) return;
   // Show loading
@@ -1325,7 +1332,10 @@ async function loadResChart(sym, period, interval, tech) {
   try {
     const cd = await(await api(`/candles?symbol=${sym}&period=${period}&interval=${interval}`)).json();
     if(cd.bars && cd.bars.length >= 5) {
-      drawChart(canvas, cd.bars, tech, 220, true, null);
+      resZoomBars = cd.bars;
+    resZoomTech = tech;
+    drawChart(canvas, cd.bars, tech, 260, true, null);
+    initResChartZoom();
       return;
     }
     // Auto-fallback: try 3-month daily (always works after hours)
@@ -1734,6 +1744,121 @@ async function loadOptChart(sym, period, interval, btn) {
     ctx.fillStyle='#ff3355';ctx.font='10px Inter';
     ctx.fillText('Chart error',W/2-30,80);
   }
+}
+
+// ══════════════════════════════════════════════════════════
+// CHART ZOOM (pinch + scroll + buttons)
+// ══════════════════════════════════════════════════════════
+let resZoomLevel = 1.0;       // 1.0 = full view, 2.0 = 2x zoom
+let resZoomOffset = 0;        // bar offset from right (0 = latest)
+let resZoomBars = null;       // full bar array for current symbol
+let resZoomTech = null;       // tech data for current symbol
+
+function resZoom(factor) {
+  resZoomLevel = Math.min(8, Math.max(1, resZoomLevel * factor));
+  redrawResChart();
+}
+function resZoomReset() {
+  resZoomLevel = 1.0; resZoomOffset = 0;
+  redrawResChart();
+}
+
+function redrawResChart() {
+  if(!resZoomBars || !resZoomBars.length) return;
+  const canvas = $('res-chart'); if(!canvas) return;
+  const totalBars = resZoomBars.length;
+  // How many bars to show at current zoom level
+  const showCount = Math.max(10, Math.floor(totalBars / resZoomLevel));
+  // Which slice to show — offset from the right
+  const endIdx = Math.max(showCount, totalBars - resZoomOffset);
+  const startIdx = Math.max(0, endIdx - showCount);
+  const visibleBars = resZoomBars.slice(startIdx, endIdx);
+  drawChart(canvas, visibleBars, resZoomTech, 260, true, null);
+}
+
+// Mouse wheel zoom on research chart
+function initResChartZoom() {
+  const canvas = $('res-chart'); if(!canvas) return;
+  // Remove old listeners by cloning
+  const fresh = canvas.cloneNode(true);
+  canvas.parentNode.replaceChild(fresh, canvas);
+  const c = $('res-chart');
+
+  // ── Mouse wheel = zoom in/out centered on cursor ──────
+  c.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.25 : 0.8;
+    // Zoom toward mouse position
+    const rect = c.getBoundingClientRect();
+    const xPct = (e.clientX - rect.left) / rect.width;
+    const totalBars = resZoomBars?.length || 0;
+    const showCount = Math.max(10, Math.floor(totalBars / resZoomLevel));
+    const barsFromRight = Math.floor((1 - xPct) * showCount);
+    resZoomLevel = Math.min(12, Math.max(1, resZoomLevel * factor));
+    const newShow = Math.max(10, Math.floor(totalBars / resZoomLevel));
+    resZoomOffset = Math.max(0, Math.min(totalBars - newShow, barsFromRight - Math.floor((1 - xPct) * newShow)));
+    redrawResChart();
+  }, {passive: false});
+
+  // ── Mouse drag = pan left/right ───────────────────────
+  let isDragging = false, dragStartX = 0, dragOffsetStart = 0;
+  c.addEventListener('mousedown', (e) => {
+    isDragging = true; dragStartX = e.clientX; dragOffsetStart = resZoomOffset;
+    c.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    const dx = e.clientX - dragStartX;
+    const totalBars = resZoomBars?.length || 0;
+    const showCount = Math.max(10, Math.floor(totalBars / resZoomLevel));
+    const barsPerPx = showCount / (c.offsetWidth || 360);
+    resZoomOffset = Math.max(0, Math.min(totalBars - showCount, Math.round(dragOffsetStart - dx * barsPerPx)));
+    redrawResChart();
+  });
+  window.addEventListener('mouseup', () => {
+    isDragging = false;
+    if(c) c.style.cursor = 'crosshair';
+  });
+
+  // ── Pinch to zoom (mobile) ────────────────────────────
+  let lastPinchDist = 0;
+  c.addEventListener('touchstart', (e) => {
+    if(e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastPinchDist = Math.sqrt(dx*dx + dy*dy);
+    }
+  }, {passive: true});
+  c.addEventListener('touchmove', (e) => {
+    if(e.touches.length === 2) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if(lastPinchDist > 0) {
+        const factor = dist / lastPinchDist;
+        resZoomLevel = Math.min(12, Math.max(1, resZoomLevel * factor));
+        redrawResChart();
+      }
+      lastPinchDist = dist;
+    }
+  }, {passive: false});
+
+  // ── Single finger drag = pan (mobile) ────────────────
+  let touchStartX = 0, zoomOffsetStart = 0;
+  c.addEventListener('touchstart', (e) => {
+    if(e.touches.length === 1) { touchStartX = e.touches[0].clientX; zoomOffsetStart = resZoomOffset; }
+  }, {passive: true});
+  c.addEventListener('touchmove', (e) => {
+    if(e.touches.length === 1 && resZoomLevel > 1) {
+      const dx = e.touches[0].clientX - touchStartX;
+      const totalBars = resZoomBars?.length || 0;
+      const showCount = Math.max(10, Math.floor(totalBars / resZoomLevel));
+      const barsPerPx = showCount / (c.offsetWidth || 360);
+      resZoomOffset = Math.max(0, Math.min(totalBars - showCount, Math.round(zoomOffsetStart - dx * barsPerPx)));
+      redrawResChart();
+    }
+  }, {passive: true});
 }
 
 function boot(){
