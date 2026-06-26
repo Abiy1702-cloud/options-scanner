@@ -84,7 +84,7 @@ html,body{height:100%;overflow:hidden;background:var(--void);color:var(--text);f
 .mc-chg{font-family:var(--bc);font-size:11px;font-weight:600;margin-top:1px}
 
 /* ── BIG SIGNAL BANNER ─────────────────────────────────── */
-.signal-banner{border-radius:8px;padding:11px 13px;border:2px solid;display:flex;align-items:center;gap:10px;position:relative;overflow:hidden}
+.signal-banner{border-radius:8px;padding:8px 12px;border:2px solid;display:flex;align-items:center;gap:8px;position:relative;overflow:visible}
 .sb-buy{border-color:var(--buy);background:rgba(0,255,136,.06)}
 .sb-sell{border-color:var(--sell);background:rgba(255,51,85,.06)}
 .sb-wait{border-color:var(--warn);background:rgba(255,176,32,.05)}
@@ -436,16 +436,18 @@ canvas.main-chart{width:100%;display:block}
   </div>
 
   <!-- Master signal — top whale pick RIGHT NOW -->
-  <div id="master-signal" class="signal-banner sb-none">
-    <span class="sig-icon-big" id="ms-icon">⏳</span>
-    <div style="flex:1;min-width:0">
-      <div class="sig-word" id="ms-word" style="color:var(--t3)">SCANNING</div>
-      <div class="sig-sym" id="ms-sym">Loading whale data...</div>
-      <div class="sig-why" id="ms-why"></div>
+  <div id="master-signal" class="signal-banner sb-none" style="padding:8px 12px;min-height:0">
+    <span id="ms-icon" style="font-size:22px;flex-shrink:0">⏳</span>
+    <div style="flex:1;min-width:0;overflow:hidden">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <span id="ms-word" style="font-family:var(--bc);font-weight:900;font-size:20px;letter-spacing:.04em;color:var(--t3)">SCANNING</span>
+        <span id="ms-sym" style="font-family:var(--bc);font-weight:700;font-size:13px;color:var(--t2)">Loading whale data...</span>
+      </div>
+      <div id="ms-why" style="font-size:9px;color:var(--text);font-family:var(--ui);margin-top:2px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
     </div>
-    <div class="sig-price">
-      <div class="sp-val" id="ms-price" style="color:var(--live)">—</div>
-      <div class="sp-chg" id="ms-chg">—</div>
+    <div style="flex-shrink:0;text-align:right;margin-left:8px">
+      <div id="ms-price" style="font-family:var(--bc);font-weight:900;font-size:18px;color:var(--live);line-height:1">—</div>
+      <div id="ms-chg" style="font-family:var(--bc);font-size:12px;font-weight:600;margin-top:2px">—</div>
     </div>
   </div>
 
@@ -812,12 +814,16 @@ async function refreshPrices() {
     }
     setPair('SPY','p-spy','c-spy','p-spy2','c-spy2');
     setPair('QQQ','p-qqq','c-qqq','p-qqq2','c-qqq2');
-    // VIX — fear index: green<15, amber 15-30, red>30
+    // VIX — fear index level color: green<15=calm, amber 15-30=caution, red>30=panic
+    // VIX RISING = more fear = BAD for market → change% shows INVERTED (red when up)
     const vix = p['VIX']||p['^VIX'];
     if(vix){
-      const vclr = vix.price>30?'var(--sell)':vix.price>20?'var(--warn)':'var(--buy)';
-      ['p-vix','p-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=vix.price.toFixed(2);e.style.color=vclr;}});
-      ['c-vix','c-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';e.style.color=vclr;}});
+      const lvlClr = vix.price>30?'var(--sell)':vix.price>20?'var(--warn)':'var(--buy)';
+      const chgClr = vix.pct>0?'var(--sell)':'var(--buy)'; // INVERTED: VIX up = market fear = red
+      const vixLabel = vix.price>30?'🔴 PANIC':vix.price>20?'😨 FEAR':'😌 CALM';
+      ['p-vix','p-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=vix.price.toFixed(2);e.style.color=lvlClr;}});
+      ['c-vix'].forEach(id=>{const e=$(id);if(e){e.textContent=vixLabel;e.style.color=lvlClr;e.style.fontSize='8px';}});
+      ['c-vix2'].forEach(id=>{const e=$(id);if(e){e.textContent=(vix.pct>=0?'+':'')+vix.pct.toFixed(2)+'%';e.style.color=chgClr;}});
     }
     // BTC
     const btc = p['BTC']||p['BTC-USD'];
@@ -853,18 +859,28 @@ async function manualRefresh() {
   catch(e){}
 }
 function setMasterSignal(w) {
-  const item=w.items?.[0]; if(!item) return;
-  const sig=w.top_signal||'WAIT';
-  const banner=$('master-signal');
-  banner.className='signal-banner '+sigCls(sig);
-  $('ms-icon').textContent=sigIcon(sig);
-  const sigCol=sig==='BUY'?'var(--buy)':sig==='SELL'?'var(--sell)':'var(--warn)';
-  $('ms-word').textContent=sig; $('ms-word').style.color=sigCol;
-  $('ms-sym').textContent=w.symbol+' — '+Array.from(new Set(w.sources||[])).join(', ');
-  $('ms-why').textContent=(w.top_reason||'');
-  $('ms-price').textContent=w.price?'$'+w.price.toFixed(2):'—';
-  $('ms-chg').textContent=w.pct!=null?fmtP(w.pct):'—';
-  if(w.pct!=null) $('ms-chg').style.color=col(w.pct);
+  if(!w) return;
+  const sig = w.top_signal||'WAIT';
+  const banner = $('master-signal');
+  banner.className = 'signal-banner '+sigCls(sig);
+  $('ms-icon').textContent = sigIcon(sig);
+  const sigCol = sig==='BUY'?'var(--buy)':sig==='SELL'?'var(--sell)':'var(--warn)';
+  $('ms-word').textContent = sig==='BUY'?'BUY NOW':sig==='SELL'?'AVOID':sig;
+  $('ms-word').style.color = sigCol;
+  $('ms-sym').textContent = w.symbol + (w.price?' · $'+w.price.toFixed(2):'');
+  $('ms-sym').style.color = sigCol;
+  const sources = Array.from(new Set(w.sources||[])).join(', ');
+  const reason  = (w.top_reason||'').slice(0,80);
+  $('ms-why').textContent = (reason||sources) ? (reason+(sources?' · '+sources:'')) : '';
+  const priceTxt = w.price?'$'+w.price.toFixed(2):'—';
+  $('ms-price').textContent = priceTxt;
+  $('ms-price').style.color = sigCol;
+  if(w.pct!=null){
+    $('ms-chg').textContent = fmtP(w.pct);
+    $('ms-chg').style.color = col(w.pct);
+  } else {
+    $('ms-chg').textContent = '—';
+  }
 }
 
 function renderScan() {
@@ -1412,7 +1428,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,totalH);
 
-  const PL=4, PR=58, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
+  const PL=4, PR=72, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
 
   // ── Y range: price only (keep indicators in view) ────────
   const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
@@ -1474,8 +1490,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
     // BB label on right
     const bbu=tech.bb_upper_series[tech.bb_upper_series.length-1];
     const bbl=tech.bb_lower_series[tech.bb_lower_series.length-1];
-    if(bbu&&isFinite(bbu)){ctx.fillStyle='rgba(179,102,255,.7)';ctx.font='7px Inter';ctx.fillText('BB+',W-PR+3,fy(bbu)+3);}
-    if(bbl&&isFinite(bbl)){ctx.fillStyle='rgba(179,102,255,.7)';ctx.font='7px Inter';ctx.fillText('BB-',W-PR+3,fy(bbl)+3);}
+    // BB labels removed — the purple fill band is self-explanatory
   }
 
   // ── Support zone (green) ──────────────────────────────
@@ -1484,9 +1499,8 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
     ctx.fillStyle='rgba(0,255,136,.08)';ctx.fillRect(PL,sy,PW,sy2-sy);
     ctx.strokeStyle='rgba(0,255,136,.5)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
     ctx.beginPath();ctx.moveTo(PL,sy);ctx.lineTo(W-PR,sy);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='#00ff88';ctx.font='bold 8px Inter';
+    ctx.fillStyle='rgba(0,255,136,.6)';ctx.font='bold 8px Inter';
     ctx.fillText('SUPPORT $'+tech.support.toFixed(2),PL+4,sy-4);
-    ctx.fillText('$'+tech.support.toFixed(2),W-PR+3,sy+3);
   }
 
   // ── Resistance zone (red) ─────────────────────────────
@@ -1495,9 +1509,8 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
     ctx.fillStyle='rgba(255,51,85,.07)';ctx.fillRect(PL,ry2,PW,ry-ry2);
     ctx.strokeStyle='rgba(255,51,85,.55)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
     ctx.beginPath();ctx.moveTo(PL,ry);ctx.lineTo(W-PR,ry);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='#ff3355';ctx.font='bold 8px Inter';
+    ctx.fillStyle='rgba(255,51,85,.7)';ctx.font='bold 8px Inter';
     ctx.fillText('RESISTANCE $'+tech.resistance.toFixed(2),PL+4,ry-4);
-    ctx.fillText('$'+tech.resistance.toFixed(2),W-PR+3,ry+3);
   }
 
   // ── Volume bars ───────────────────────────────────────
@@ -1518,8 +1531,16 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
     ctx.fillRect(x-bw/2,Math.min(fy(b.o),fy(b.c)),bw,Math.max(Math.abs(fy(b.c)-fy(b.o)),1));
   });
 
+  // ── Smart right-side label system — no overlaps ───────
+  // Collect all labels, sort by Y, then space them out
+  const _rightLabels = [];  // {y, text, color, bold}
+  const addRLabel = (y, text, color, bold=false) => {
+    if(y<PT||y>h-PB) return;
+    _rightLabels.push({y, text, color, bold});
+  };
+
   // ── Indicator lines ───────────────────────────────────
-  const line=(s,color,lw=1.2,dash=[],label='',labelColor='')=>{
+  const line=(s,color,lw=1.2,dash=[],labelText='',labelColor='',bold=false)=>{
     if(!s||!s.length)return;
     ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash(dash);ctx.beginPath();
     let first=true;
@@ -1528,21 +1549,43 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
       const x=PL+i*cw+cw/2,y=fy(v);first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);
     });
     ctx.stroke();ctx.setLineDash([]);
-    // Label at right edge
-    if(label){
+    // Queue label — don't draw yet
+    if(labelText){
       const last=s.filter(v=>v&&isFinite(v)&&v>LO*.7&&v<HI*1.3).pop();
-      if(last){
-        ctx.fillStyle=labelColor||color;ctx.font='bold 7px Inter';
-        ctx.fillText(label+' $'+last.toFixed(2),W-PR+3,fy(last)+3);
-      }
+      if(last!=null) addRLabel(fy(last), labelText+' $'+last.toFixed(2), labelColor||color, bold);
     }
   };
   if(tech){
-    line(tech.vwap_series, '#ffb020',1.5,[],'VWAP','#ffb020');
-    line(tech.ema9_series, '#00d4ff',1.2,[],'EMA9','#00d4ff');
-    line(tech.ema20_series,'#7a9ab5',1.0,[],'EMA20','#7a9ab5');
-    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'EMA50','#b366ff');
+    line(tech.vwap_series, '#ffb020',2.0,[],'VWAP','#ffb020',true);
+    line(tech.ema9_series, '#00d4ff',1.4,[],'9','#00d4ff');
+    line(tech.ema20_series,'#7a9ab5',1.0,[],'20','#7a9ab5');
+    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'50','#b366ff');
   }
+  // Queue support/resistance labels too
+  if(tech&&tech.support&&isFinite(tech.support))    addRLabel(fy(tech.support),'SUP $'+tech.support.toFixed(2),'#00ff88',true);
+  if(tech&&tech.resistance&&isFinite(tech.resistance)) addRLabel(fy(tech.resistance),'RES $'+tech.resistance.toFixed(2),'#ff3355',true);
+
+  // ── Draw all right labels — staggered to avoid overlap ─
+  // Sort by Y position, then push apart any that are within 11px
+  _rightLabels.sort((a,b)=>a.y-b.y);
+  const MIN_GAP = 11;
+  // Forward pass — push down
+  for(let i=1;i<_rightLabels.length;i++){
+    if(_rightLabels[i].y - _rightLabels[i-1].y < MIN_GAP)
+      _rightLabels[i].y = _rightLabels[i-1].y + MIN_GAP;
+  }
+  // Backward pass — push up if we hit bottom
+  for(let i=_rightLabels.length-2;i>=0;i--){
+    if(_rightLabels[i+1].y - _rightLabels[i].y < MIN_GAP)
+      _rightLabels[i].y = _rightLabels[i+1].y - MIN_GAP;
+  }
+  // Now draw all labels
+  _rightLabels.forEach(({y,text,color,bold})=>{
+    if(y<PT-2||y>h+2) return;
+    ctx.fillStyle=color;
+    ctx.font=(bold?'bold ':'')+'8px Inter';
+    ctx.fillText(text, W-PR+3, y+3);
+  });
 
   // ── Trade entry / target / stop lines ─────────────────
   if(trade&&trade.entry&&isFinite(trade.entry)){
@@ -1648,17 +1691,20 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
     ctx.fillRect(PL,aboveVwap?fy(lp):vwapY,PW,aboveVwap?vwapY-fy(lp):fy(lp)-vwapY);
   }
 
-  // ── Current price line ────────────────────────────────
+  // ── Current price line + badge ────────────────────────
   if(bars.length){
     const lp=bars[bars.length-1].c;
     if(isFinite(lp)){
       const ly=fy(lp);
-      ctx.strokeStyle='rgba(255,255,255,.2)';ctx.setLineDash([3,5]);ctx.lineWidth=1;
+      ctx.strokeStyle='rgba(255,255,255,.25)';ctx.setLineDash([3,5]);ctx.lineWidth=1;
       ctx.beginPath();ctx.moveTo(PL,ly);ctx.lineTo(W-PR,ly);ctx.stroke();ctx.setLineDash([]);
-      // Price badge box
-      ctx.fillStyle='rgba(0,212,255,.2)';ctx.fillRect(W-PR+1,ly-8,PR-2,14);
-      ctx.fillStyle='#00d4ff';ctx.font='bold 9px Inter';
-      ctx.fillText('$'+lp.toFixed(2),W-PR+3,ly+3);
+      // Price badge — bright box, always on top
+      const prTxt='$'+lp.toFixed(2);
+      ctx.font='bold 9px Inter';
+      const tw=ctx.measureText(prTxt).width;
+      ctx.fillStyle='rgba(0,180,255,.3)';ctx.fillRect(W-PR+1,ly-8,tw+7,15);
+      ctx.strokeStyle='rgba(0,212,255,.8)';ctx.lineWidth=.8;ctx.strokeRect(W-PR+1,ly-8,tw+7,15);
+      ctx.fillStyle='#00e5ff';ctx.fillText(prTxt,W-PR+4,ly+3);
     }
   }
 }
