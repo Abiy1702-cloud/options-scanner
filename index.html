@@ -318,6 +318,70 @@ canvas.main-chart{width:100%;display:block}
 .empty-state{text-align:center;padding:20px;color:var(--t3);font-size:10px;font-family:var(--ui);line-height:2}
 .loading-bar{height:2px;background:linear-gradient(90deg,var(--live),var(--buy),var(--live));background-size:200%;animation:lb 1.5s linear infinite;border-radius:2px;margin:8px 0}
 @keyframes lb{0%{background-position:0%}100%{background-position:200%}}
+
+/* ── MOBILE FONT SCALE — readable on all screen sizes ── */
+@media screen {
+  /* Base scale up — everything was too small */
+  .card-t        { font-size:10px !important; }
+  .pill          { font-size:9px !important; }
+  .mc-sym        { font-size:10px !important; }
+  .mc-price      { font-size:16px !important; }
+  .mc-chg        { font-size:11px !important; }
+  .scan-status   { font-size:10px !important; }
+  .si-stats .si-stat { font-size:10px !important; }
+  .si-score-lbl  { font-size:9px !important; }
+  .tw-meta       { font-size:10px !important; }
+  .tw-prog-lbls  { font-size:9px !important; }
+  .tw-mode       { font-size:9px !important; }
+  .tw-pnl-pct    { font-size:12px !important; }
+  .btn-chart-toggle, .btn-ai { font-size:11px !important; }
+  .oc-strategy   { font-size:10px !important; }
+  .oc-pnl-sub    { font-size:10px !important; }
+  .ocs-lbl       { font-size:9px !important; }
+  .struct-label  { font-size:10px !important; }
+  .struct-val    { font-size:10px !important; }
+  .mg-cell .mgc-lbl  { font-size:9px !important; }
+  .mg-cell .mgc-sub  { font-size:9px !important; }
+  .ml-cell .mlc-mode { font-size:9px !important; }
+  .mlc-target, .mlc-stop { font-size:13px !important; }
+  .lv-lbl        { font-size:9px !important; }
+  .lv-val        { font-size:15px !important; }
+  .ai-analysis   { font-size:11px !important; line-height:1.8 !important; }
+  .ai-label      { font-size:9px !important; }
+  .ez-note       { font-size:10px !important; }
+  .msg-u, .msg-a { font-size:11px !important; }
+  .msg-a-lbl     { font-size:9px !important; }
+  .chat-inp      { font-size:12px !important; }
+  .chat-send     { font-size:12px !important; }
+  .qq            { font-size:10px !important; }
+  .chart-legend .cl-item { font-size:9px !important; }
+  .hist-row .hr-meta { font-size:9px !important; }
+  .pgc-lbl       { font-size:9px !important; }
+  .pgc-sub       { font-size:9px !important; }
+  .sig-why       { font-size:11px !important; }
+  .sig-sym       { font-size:13px !important; }
+  .scan-hdr .card-t { font-size:11px !important; }
+  .hold-rec      { font-size:10px !important; }
+  .opt-card .oc-stats .ocs-lbl { font-size:9px !important; }
+  .opt-card .ocs-val { font-size:13px !important; }
+  .verdict-box .vb-why { font-size:11px !important; }
+  .hot-chip      { font-size:10px !important; }
+  .tf-btn        { font-size:11px !important; }
+  .ctb-btn       { font-size:12px !important; }
+  .empty-state   { font-size:12px !important; }
+  .spin-text     { font-size:11px !important; }
+  /* Progress page */
+  .perf-grid .pgc-val { font-size:18px !important; }
+  #report-body   { font-size:11px !important; line-height:1.8 !important; }
+  /* Research page labels */
+  .res-inp       { font-size:16px !important; }
+}
+
+/* Specifically for the wc-detail and source title in whale cards */
+.wc-detail      { font-size:10px !important; }
+.ws-lbl         { font-size:9px !important; }
+.ws-val         { font-size:12px !important; }
+.wc-sources .src-badge { font-size:9px !important; }
 </style>
 </head>
 <body>

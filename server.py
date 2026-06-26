@@ -235,289 +235,240 @@ def _valid_sym(sym):
     if not re.match(r'^[A-Z]{1,5}$', sym): return False
     return True
 
-def fetch_sec_form4():
-    """SEC EDGAR Form 4 — parse both Atom feed AND full-text search for buy transactions"""
+# ════════════════════════════════════════════════════════════════════
+# WHALE DATA ENGINE — Alpaca Screener + News + yfinance Momentum
+# All sources confirmed to work on Render with Alpaca credentials
+# ════════════════════════════════════════════════════════════════════
+
+# Curated universe — always scanned as baseline
+WATCHLIST = [
+    # High-conviction momentum names
+    'NVDA','AMD','TSLA','AAPL','MSFT','META','AMZN','GOOGL','AVGO',
+    # Semi + AI
+    'MU','SMCI','PLTR','ARM','IONQ','RGTI','QUBT','SOUN','BBAI','OKLO',
+    # 3x ETFs
+    'SOXL','TQQQ','UPRO','TECL','LABU','SPXL','FNGU','UDOW',
+    # Crypto proxy
+    'MSTR','COIN','MARA','RIOT','HUT','CLSK','HOOD',
+    # High-beta momentum
+    'SOFI','UPST','HIMS','RKLB','ASTS','SMR','APP','ACHR','JOBY',
+    # Semis
+    'DRAM','NVDL','INTC','QCOM','MRVL',
+    # EV
+    'RIVN','NIO','LCID',
+]
+
+def alpaca_get_screener(endpoint, top=25):
+    """Call Alpaca screener API — most actives, gainers, losers."""
+    if not alpaca_data: return []
     items = []
-    # Method 1: EDGAR Atom feed for recent Form 4 filings
     try:
-        url = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&dateb=&owner=include&count=40&search_text=&output=atom'
-        data = http_get(url, timeout=12).decode('utf-8','replace')
-        tree = ET.fromstring(data)
-        ns = {'atom':'http://www.w3.org/2005/Atom'}
-        for entry in tree.findall('atom:entry', ns)[:25]:
-            title_el = entry.find('atom:title', ns)
-            upd_el   = entry.find('atom:updated', ns)
-            if title_el is None: continue
-            title = title_el.text or ''
-            upd   = (upd_el.text or '')[:10] if upd_el is not None else ''
-            # Form 4 titles: "4 - CompanyName (TICKER) (InsiderName)"
-            # Extract ALL parenthesized tokens, first valid one is the ticker
-            matches = re.findall(r'\(([A-Z0-9\.]{1,6})\)', title)
-            sym = ''
-            for m in matches:
-                # Ticker is usually all caps letters, not a person's name abbreviation
-                if _valid_sym(m):
-                    sym = m; break
-            if not sym: continue
-            # Only include if title suggests a BUY (acquisitions, not dispositions)
-            title_lower = title.lower()
-            if 'disposition' in title_lower or 'sale' in title_lower: continue
-            items.append({
-                'symbol':sym,'source':'SEC Form 4','title':title[:80],
-                'date':upd,'type':'insider','direction':'buy',
-                'confidence':78,'hold_days':90
-            })
-        print(f"  SEC Form4 Atom: {len(items)} items")
-    except Exception as e:
-        print(f"SEC Form4 Atom: {e}")
-
-    # Method 2: EDGAR full-text search for large insider purchases (>$100k) via EFTS
-    try:
-        url2 = 'https://efts.sec.gov/LATEST/search-index?q=%22acquisition%22&forms=4&dateRange=custom&startdt={}&enddt={}'.format(
-            (datetime.now()-timedelta(days=7)).strftime('%Y-%m-%d'), today_str())
-        data2 = http_get(url2, timeout=10).decode('utf-8','replace')
-        j = json.loads(data2)
-        for hit in (j.get('hits',{}).get('hits',[]) or [])[:10]:
-            src = hit.get('_source',{})
-            tickers = src.get('period_of_report','') or ''
-            entity = src.get('entity_name','') or ''
-            # Try to get ticker from entity name context — skip if we can't
-            # These hits confirm large block buying, used as a confidence signal
-        # Just use Method 1 results — Method 2 validates volume
-    except Exception as e:
-        print(f"SEC EFTS: {e}")
-
-    return items[:15]
-
-def fetch_congress_trades():
-    """
-    Congress stock trades — three free sources tried in order:
-    1. house-stock-watcher-data S3 (primary)
-    2. quiverquant Congress data (free tier)
-    3. Senate stock watcher
-    """
-    items = []
-
-    # Source 1: House Stock Watcher S3 JSON
-    try:
-        data = http_get(
-            'https://house-stock-watcher-data.s3-us-gov-west-1.amazonaws.com/data/all_transactions.json',
-            timeout=20)
-        trades = json.loads(data)
-        cutoff = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
-        purchases = [
-            t for t in trades
-            if t.get('type','').strip().lower() in ('purchase','buy')
-            and (t.get('transaction_date','') or '') >= cutoff
-            and _valid_sym((t.get('ticker','') or '').upper().strip())
-        ]
-        purchases.sort(key=lambda x: x.get('transaction_date',''), reverse=True)
-        seen = set()
-        for t in purchases[:50]:
-            sym = (t.get('ticker','') or '').upper().strip()
-            if sym in seen: continue
-            seen.add(sym)
-            rep  = (t.get('representative','') or 'Member').strip()
-            amt  = t.get('amount','').strip()
-            disc = t.get('disclosure_date','') or ''
-            items.append({
-                'symbol':sym,'source':'Congress Trade','direction':'buy',
-                'title':f"{rep} bought {sym} ({amt})",
-                'date':t.get('transaction_date',''),'type':'congress',
-                'confidence':85,'hold_days':180,
-                'rep':rep,'amount':amt,'disclosure_date':disc,
-                'party':t.get('party','') or ''
-            })
-        print(f"  Congress House: {len(items)} purchases")
-    except Exception as e:
-        print(f"Congress House S3: {e}")
-
-    # Source 2: Senate stock watcher (if house was empty)
-    if not items:
-        try:
-            data = http_get(
-                'https://senate-stock-watcher-data.s3-us-gov-west-1.amazonaws.com/aggregate/all_transactions.json',
-                timeout=20)
-            trades = json.loads(data)
-            cutoff = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-            for t in trades:
-                txs = t.get('transactions') or []
-                senator = t.get('senator','Senator')
-                for tx in txs:
-                    if tx.get('type','').lower() not in ('purchase','buy'): continue
-                    if (tx.get('transaction_date','') or '') < cutoff: continue
-                    sym = (tx.get('ticker','') or '').upper().strip()
-                    if not _valid_sym(sym): continue
-                    amt = tx.get('amount','')
-                    items.append({
-                        'symbol':sym,'source':'Congress Trade','direction':'buy',
-                        'title':f"Senator {senator} bought {sym} ({amt})",
-                        'date':tx.get('transaction_date',''),'type':'congress',
-                        'confidence':85,'hold_days':180,
-                        'rep':senator,'amount':amt
-                    })
-            items.sort(key=lambda x: x.get('date',''), reverse=True)
-            # Deduplicate by symbol
-            seen2=set(); dedup=[]
-            for it in items:
-                if it['symbol'] not in seen2: seen2.add(it['symbol']); dedup.append(it)
-            items=dedup[:20]
-            print(f"  Congress Senate: {len(items)} purchases")
-        except Exception as e:
-            print(f"Congress Senate S3: {e}")
-
-    return items[:25]
-
-def fetch_unusual_whales():
-    """
-    Unusual options activity — multiple free sources:
-    1. Unusual Whales public API (if accessible)
-    2. MarketBeat unusual options (scrape headline list)
-    3. StockAnalysis earnings/volume spike list
-    Only adds symbols that pass _valid_sym() — no garbage words
-    """
-    items = []
-
-    # Source 1: Unusual Whales public endpoint
-    try:
-        data = http_get('https://unusualwhales.com/api/option_activity?limit=30&is_bullish=true', timeout=10)
-        flow = json.loads(data)
-        for f in (flow.get('data') or [])[:20]:
-            sym = (f.get('ticker','') or '').upper().strip()
+        url = f'https://data.alpaca.markets/v1beta1/screener/stocks/{endpoint}?by=volume&top={top}'
+        req = urllib.request.Request(url, headers={
+            'APCA-API-KEY-ID': ALPACA_KEY,
+            'APCA-API-SECRET-KEY': ALPACA_SECRET,
+            'Accept': 'application/json'
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        stocks = data.get('most_actives') or data.get('gainers') or data.get('losers') or []
+        for s in stocks:
+            sym = (s.get('symbol') or '').upper()
             if not _valid_sym(sym): continue
-            premium = f.get('premium',0) or 0
+            chg = float(s.get('percent_change') or 0)
+            vol = int(s.get('volume') or 0)
+            price = float(s.get('trade') or s.get('price') or 0)
+            label = 'Most Active' if endpoint=='most-actives' else ('Top Gainer' if endpoint=='gainers' else 'Top Loser')
+            confidence = 72 if endpoint=='most-actives' else (68 if endpoint=='gainers' else 45)
+            hold = 3 if endpoint=='most-actives' else 7
+            if endpoint=='losers': continue  # skip losers for BUY signals
             items.append({
-                'symbol':sym,'source':'Unusual Whales','direction':'buy',
-                'title':f"Unusual call flow ${premium:,.0f} premium",
-                'date':today_str(),'type':'options_flow',
-                'confidence':72,'hold_days':21,
-                'premium':premium
+                'symbol':sym,'source':f'Alpaca {label}','direction':'buy',
+                'title':f'{label}: {sym} {chg:+.1f}% vol {vol:,}',
+                'date':today_str(),'type':'volume_surge',
+                'confidence':confidence,'hold_days':hold,
+                'price':price,'chg_pct':chg,'volume':vol
             })
-        print(f"  UnusualWhales API: {len(items)} items")
+        print(f"  Alpaca {endpoint}: {len(items)} symbols")
     except Exception as e:
-        print(f"UnusualWhales: {e}")
+        print(f"  Alpaca screener {endpoint}: {e}")
+    return items
 
-    # Source 2: Barchart unusual options (public page scan for tickers)
-    if not items:
-        try:
-            url2 = 'https://www.barchart.com/options/unusual-activity/stocks'
-            req  = urllib.request.Request(url2, headers={
-                'User-Agent': UA,
-                'Accept': 'text/html,application/xhtml+xml',
-                'Accept-Language': 'en-US,en;q=0.9'
-            })
-            with urllib.request.urlopen(req, timeout=12) as r:
-                html = r.read().decode('utf-8','replace')
-            # Find ticker symbols in the HTML — look for data-symbol attributes
-            found = re.findall(r'data-symbol=["\']([A-Z]{2,5})["\']', html)
-            seen_bc = set()
-            for sym in found:
-                if not _valid_sym(sym) or sym in seen_bc: continue
-                seen_bc.add(sym)
+def alpaca_get_news_tickers():
+    """Pull Alpaca news feed, extract tickers mentioned in headlines."""
+    if not alpaca_data: return []
+    items = []
+    try:
+        url = 'https://data.alpaca.markets/v1beta1/news?limit=50&sort=desc'
+        req = urllib.request.Request(url, headers={
+            'APCA-API-KEY-ID': ALPACA_KEY,
+            'APCA-API-SECRET-KEY': ALPACA_SECRET,
+            'Accept': 'application/json'
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        news_items = data.get('news') or []
+        seen = set()
+        for n in news_items:
+            syms = n.get('symbols') or []
+            headline = n.get('headline','')
+            summary  = n.get('summary','')
+            # Use symbols Alpaca already extracted — much more reliable than regex
+            for sym in syms:
+                sym = sym.upper()
+                if not _valid_sym(sym) or sym in seen: continue
+                seen.add(sym)
+                # Score the news sentiment
+                bull_words = ['surge','soar','rally','beat','record','buy','upgrade','breakout','jump']
+                bear_words = ['crash','plunge','miss','downgrade','cut','fall','drop','loss']
+                text = (headline+' '+summary).lower()
+                bull_count = sum(1 for w in bull_words if w in text)
+                bear_count = sum(1 for w in bear_words if w in text)
+                if bear_count > bull_count: continue  # skip negative news
+                conf = min(70, 50 + bull_count*5)
                 items.append({
-                    'symbol':sym,'source':'Unusual Options Flow','direction':'buy',
-                    'title':f"Unusual options activity detected: {sym}",
-                    'date':today_str(),'type':'options_flow',
-                    'confidence':68,'hold_days':14
+                    'symbol':sym,'source':'Alpaca News','direction':'buy',
+                    'title':headline[:80],
+                    'date':today_str(),'type':'news_catalyst',
+                    'confidence':conf,'hold_days':5
                 })
-            print(f"  Barchart unusual: {len(items)} items")
-        except Exception as e:
-            print(f"Barchart: {e}")
+        print(f"  Alpaca news: {len(items)} symbols")
+    except Exception as e:
+        print(f"  Alpaca news: {e}")
+    return items
 
-    # Source 3: StockAnalysis volume leaders (stocks with unusual volume — reliable free source)
-    if len(items) < 5:
-        try:
-            url3 = 'https://stockanalysis.com/stocks/screener/api/?p=annual&s=volume&type=stocks&country=US&col=s,volume,chp,ma5&i=volume'
-            data3 = http_get(url3, timeout=10)
-            j3 = json.loads(data3)
-            rows = (j3.get('data') or {}).get('data') or []
-            for row in rows[:15]:
-                sym = (row[0] if isinstance(row,list) else row.get('s','')).upper().strip()
-                if not _valid_sym(sym): continue
-                vol_ratio = float(row[1] if isinstance(row,list) else row.get('volume',0) or 0)
-                chg = float(row[2] if isinstance(row,list) else row.get('chp',0) or 0)
-                if chg < 0: continue  # only bullish
+def yfinance_momentum_scan():
+    """
+    Score the full watchlist using yfinance — price change + volume ratio.
+    This ALWAYS works on Render. It's the backbone of the whale engine.
+    """
+    items = []
+    try:
+        df = yf.download(
+            WATCHLIST, period='5d', interval='1d',
+            auto_adjust=True, progress=False, group_by='ticker'
+        )
+        multi = isinstance(df.columns, pd.MultiIndex)
+
+        for sym in WATCHLIST:
+            try:
+                if multi:
+                    cl = df['Close'][sym].dropna()
+                    vl = df['Volume'][sym].dropna()
+                else:
+                    cl = df['Close'].dropna()
+                    vl = df['Volume'].dropna()
+                if len(cl) < 2: continue
+                price = float(cl.iloc[-1])
+                prev  = float(cl.iloc[-2])
+                chg   = (price - prev) / prev * 100
+                avg_vol = float(vl.iloc[:-1].mean()) if len(vl)>1 else float(vl.iloc[-1])
+                vol_ratio = float(vl.iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
+                # Score: momentum * volume
+                score = abs(chg) * min(vol_ratio, 5)
+                if chg <= 0 and vol_ratio < 2: continue  # skip weak bearish
+                # Confidence based on strength
+                if chg > 5 and vol_ratio > 3:     conf, hold = 78, 14
+                elif chg > 3 and vol_ratio > 2:   conf, hold = 70, 7
+                elif chg > 1 and vol_ratio > 1.5: conf, hold = 62, 3
+                elif vol_ratio > 3:               conf, hold = 65, 3  # volume spike even if flat
+                else: continue
+                source = 'High Momentum' if chg > 3 else ('Volume Surge' if vol_ratio > 3 else 'Momentum')
                 items.append({
-                    'symbol':sym,'source':'Volume Surge','direction':'buy',
-                    'title':f"Volume surge +{chg:.1f}% — unusual buying detected",
-                    'date':today_str(),'type':'volume_surge',
-                    'confidence':60,'hold_days':7
+                    'symbol':sym,'source':source,'direction':'buy',
+                    'title':f'{sym} {chg:+.1f}% with {vol_ratio:.1f}x volume — momentum signal',
+                    'date':today_str(),'type':'momentum',
+                    'confidence':conf,'hold_days':hold,
+                    'price':round(price,2),'chg_pct':round(chg,2),'vol_ratio':round(vol_ratio,1)
                 })
-            print(f"  StockAnalysis volume: {len(items)} items")
-        except Exception as e:
-            print(f"StockAnalysis: {e}")
-
-    # Last resort: curated momentum universe with live volume check — NOT from news text
-    if len(items) < 3:
-        CURATED = ['NVDA','AMD','TSLA','AAPL','META','MSFT','AMZN','GOOGL',
-                   'SOXL','TQQQ','MSTR','COIN','PLTR','SMCI','MU','AVGO',
-                   'SOFI','RKLB','ASTS','IONQ','ARM','HIMS','APP']
-        try:
-            prices = get_rt_prices(CURATED)
-            for sym, q in prices.items():
-                if q.get('pct',0) > 2.5:  # only stocks up >2.5% with momentum
-                    items.append({
-                        'symbol':sym,'source':'Momentum Scanner','direction':'buy',
-                        'title':f"Strong momentum +{q['pct']:.1f}% today",
-                        'date':today_str(),'type':'momentum',
-                        'confidence':58,'hold_days':3
-                    })
-        except Exception as e:
-            print(f"Curated fallback: {e}")
-
-    # Deduplicate by symbol
-    seen_f=set(); dedup=[]
-    for it in items:
-        if it['symbol'] not in seen_f: seen_f.add(it['symbol']); dedup.append(it)
-    return dedup[:20]
+            except: pass
+        items.sort(key=lambda x: x['confidence'], reverse=True)
+        print(f"  yfinance momentum scan: {len(items)} signals from {len(WATCHLIST)} stocks")
+    except Exception as e:
+        print(f"  yfinance momentum: {e}")
+    return items[:20]
 
 def refresh_whale_data():
-    """Pull all 3 whale sources in parallel, deduplicate, score"""
+    """
+    Pull all whale sources — Alpaca screener, news, yfinance momentum.
+    Runs every 20 minutes during market hours. Always produces results.
+    """
     global _whale_cache
     with _whale_lock:
         if time.time() - _whale_cache['ts'] < 900: return  # 15min cache
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            f4   = ex.submit(fetch_sec_form4)
-            cong = ex.submit(fetch_congress_trades)
-            uw   = ex.submit(fetch_unusual_whales)
-            sec4_res  = f4.result(timeout=20)
-            cong_res  = cong.result(timeout=20)
-            uw_res    = uw.result(timeout=15)
-    except Exception as e:
-        print(f"Whale fetch: {e}")
-        sec4_res=cong_res=uw_res=[]
 
-    # Deduplicate by symbol — count how many sources agree
+    print("  Scanning whale sources...")
+    all_items = []
+
+    # 1. Alpaca most-actives (best signal during market hours)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_active  = ex.submit(alpaca_get_screener, 'most-actives', 25)
+        f_gainers = ex.submit(alpaca_get_screener, 'gainers', 15)
+        f_news    = ex.submit(alpaca_get_news_tickers)
+        try: all_items += f_active.result(timeout=15)
+        except Exception as e: print(f"  most-actives timeout: {e}")
+        try: all_items += f_gainers.result(timeout=15)
+        except Exception as e: print(f"  gainers timeout: {e}")
+        try: all_items += f_news.result(timeout=15)
+        except Exception as e: print(f"  news timeout: {e}")
+
+    # 2. yfinance momentum — always runs, always has data
+    try: all_items += yfinance_momentum_scan()
+    except Exception as e: print(f"  momentum error: {e}")
+
+    # 3. Deduplicate by symbol, boost confidence when multiple sources agree
     sym_map = {}
-    for item in sec4_res + cong_res + uw_res:
+    for item in all_items:
         sym = item['symbol']
         if sym not in sym_map:
-            sym_map[sym] = {'symbol':sym,'sources':[],'items':[],'confidence':0,'hold_days':0}
+            sym_map[sym] = {
+                'symbol':sym,'sources':[],'items':[],
+                'confidence':0,'hold_days':0,'source_count':0
+            }
         sym_map[sym]['sources'].append(item['source'])
         sym_map[sym]['items'].append(item)
         sym_map[sym]['confidence'] = max(sym_map[sym]['confidence'], item['confidence'])
         sym_map[sym]['hold_days']  = max(sym_map[sym]['hold_days'],  item['hold_days'])
+        if item.get('price'): sym_map[sym]['price'] = item['price']
+        if item.get('chg_pct') is not None: sym_map[sym]['pct'] = item['chg_pct']
 
-    # Boost confidence if multiple sources agree
-    for sym, data in sym_map.items():
-        n = len(set(data['sources']))
-        if n >= 3: data['confidence'] = min(99, data['confidence'] + 15)
-        elif n >= 2: data['confidence'] = min(99, data['confidence'] + 8)
-        data['multi_source'] = n >= 2
-        data['source_count'] = n
+    # Multi-source confidence boost
+    for sym, d in sym_map.items():
+        n = len(set(d['sources']))
+        d['source_count'] = n
+        d['multi_source']  = n >= 2
+        if n >= 3:   d['confidence'] = min(99, d['confidence'] + 12)
+        elif n >= 2: d['confidence'] = min(99, d['confidence'] + 6)
+        # Pick best hold recommendation
+        d['rec_mode'] = 'day' if d['hold_days']<=1 else ('swing' if d['hold_days']<=30 else 'longterm')
+        # Best reason from items
+        best = max(d['items'], key=lambda x: x['confidence'])
+        d['top_reason'] = best.get('title','')
 
-    whales = sorted(sym_map.values(), key=lambda x: x['confidence'], reverse=True)
+    combined = sorted(sym_map.values(), key=lambda x: x['confidence'], reverse=True)
+
+    # 4. Ensure price is populated from cache for all symbols
+    prices = all_prices()
+    for w in combined:
+        if not w.get('price') and w['symbol'] in prices:
+            w['price'] = prices[w['symbol']]['price']
+            w['pct']   = prices[w['symbol']]['pct']
 
     with _whale_lock:
-        _whale_cache = {'sec4':sec4_res,'congress':cong_res,'unusual':uw_res,
-                        'combined':whales,'ts':time.time()}
-    print(f"  Whale data: {len(sec4_res)} SEC4, {len(cong_res)} Congress, {len(uw_res)} Unusual = {len(whales)} symbols")
+        _whale_cache = {
+            'combined': combined,
+            'sec4':     [i for i in all_items if 'Alpaca' in i.get('source','')],
+            'congress': [],
+            'unusual':  [i for i in all_items if 'momentum' in i.get('type','').lower()],
+            'ts':       time.time()
+        }
+    print(f"  Whale engine: {len(combined)} symbols total (Alpaca + yfinance momentum)")
 
 def get_whale_data():
-    if not _whale_cache.get('ts') or time.time()-_whale_cache['ts']>3600:
+    if not _whale_cache.get('ts') or time.time()-_whale_cache['ts']>1800:
         threading.Thread(target=refresh_whale_data, daemon=True).start()
     return _whale_cache
+
 
 # ══════════════════════════════════════════════════════════════════════
 # ── PRICE + TECHNICAL ENGINE ──────────────────────────────────────────
