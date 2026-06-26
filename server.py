@@ -758,64 +758,74 @@ def compute_technicals(sym, df=None):
     }
 
 def whale_score_and_recommend(sym, tech, whale_item=None):
-    """Compute overall whale conviction score — real sources score much higher than news fallback"""
+    """
+    Differentiating score 0-99:
+    AAPL down 6% SELL = ~15-25 | NVDA BUY above VWAP = ~50-65 | Congress+BUY = ~85-99
+    """
     score   = 0
     reasons = []
 
-    # ── Technical component (max 35 pts) ─────────────────────────────
+    # ── Technical: PRIMARY differentiator (max 45 pts) ───────────────
     if tech:
-        bp = tech.get('bull_pts', 0)
-        score += bp * 6  # max 24
-        if tech.get('rsi_oversold'):  score += 8;  reasons.append('RSI oversold — bounce zone')
-        if tech.get('near_support'):  score += 6;  reasons.append('Near key support')
-        if tech.get('macd_bull'):     score += 6;  reasons.append('MACD bullish crossover')
-        if tech.get('above_vwap'):    score += 5;  reasons.append('Trading above VWAP')
-        if tech.get('trend') == 'bullish': score += 4
+        sig = tech.get('signal', 'WAIT')
+        rsi = float(tech.get('rsi', 50) or 50)
+        chg = float(tech.get('change_pct', 0) or 0)
+        bp  = tech.get('bull_pts', 0)
 
-    # ── Whale source component (max 65 pts) ───────────────────────────
+        # Signal is the main driver
+        if sig == 'BUY':
+            score += 15 + bp * 5          # 15-35 for strong BUY
+            if tech.get('above_vwap'):    score += 5;  reasons.append('Above VWAP')
+            if tech.get('macd_bull'):     score += 4;  reasons.append('MACD bullish')
+            if tech.get('rsi_oversold'):  score += 5;  reasons.append('RSI oversold bounce')
+            if tech.get('near_support'):  score += 4;  reasons.append('Near support')
+            if tech.get('trend') == 'bullish': score += 3
+        elif sig == 'WAIT':
+            score += 8
+            if tech.get('macd_bull'):     score += 3
+            if tech.get('above_vwap'):    score += 3
+        else:  # SELL
+            score -= 5
+
+        # Price change today differentiates same-signal stocks
+        if   chg > 8:  score += 12; reasons.append(f'+{chg:.1f}% strong momentum')
+        elif chg > 5:  score += 8;  reasons.append(f'+{chg:.1f}% momentum')
+        elif chg > 2:  score += 4
+        elif chg > 0:  score += 1
+        elif chg < -8: score -= 15; reasons.append(f'{chg:.1f}% heavy selling')
+        elif chg < -4: score -= 10; reasons.append(f'{chg:.1f}% declining')
+        elif chg < -1: score -= 4
+
+        # RSI extremes
+        if   rsi < 30: score += 6; reasons.append(f'RSI {rsi:.0f} oversold')
+        elif rsi > 75: score -= 8; reasons.append(f'RSI {rsi:.0f} overbought — caution')
+
+    # ── Whale source component (max 55 pts) ──────────────────────────
     if whale_item:
         src_types = set(it.get('type','') for it in whale_item.get('items', []))
         sources   = set(whale_item.get('sources', []))
 
-        # Score each source type — real named sources score much higher
-        if 'congress' in src_types:
-            score += 38
-            reps = [it.get('rep','') for it in whale_item.get('items',[]) if it.get('type')=='congress']
-            reasons.append(f"Congress purchase: {reps[0] if reps else 'member'}")
-        if 'insider' in src_types:
-            score += 30
-            reasons.append('SEC Form 4 insider acquisition')
-        if 'options_flow' in src_types:
-            score += 22
-            reasons.append('Unusual options flow detected')
-        if 'volume_surge' in src_types:
-            score += 15
-            reasons.append('Volume surge — institutional buying pattern')
-        if 'momentum' in src_types:
-            score += 10
-            reasons.append('Strong price momentum today')
-        # news_flow is the weakest signal — should NOT auto-trigger entries
-        if src_types == {'news_flow'}:
-            score = min(score, 55)  # hard cap at 55 if only source is news text
-            reasons.append('⚠ News-only signal — verify before entering')
+        if 'congress'     in src_types: score += 35; reps=[it.get('rep','') for it in whale_item.get('items',[]) if it.get('type')=='congress']; reasons.append(f"Congress buy: {reps[0] if reps else 'member'}")
+        if 'insider'      in src_types: score += 28; reasons.append('SEC Form 4 insider buy')
+        if 'options_flow' in src_types: score += 20; reasons.append('Unusual options flow')
+        if 'volume_surge' in src_types: score += 12; reasons.append('Volume surge')
+        if 'momentum'     in src_types: score += 8;  reasons.append('Price momentum')
+        if 'news_catalyst'in src_types: score += 5
+        if src_types == {'news_flow'}:  score = min(score, 42)  # hard cap on news-only
 
-        # Multi-source agreement bonus
-        real_count = len([s for s in sources if 'News' not in s])
-        if real_count >= 3: score += 12; reasons.append('3+ real whale sources agree')
-        elif real_count >= 2: score += 7; reasons.append('2 real whale sources agree')
+        real_count = len([s for s in sources if 'News' not in s and 'Momentum' not in s])
+        if real_count >= 3: score += 10; reasons.append('3+ sources agree')
+        elif real_count >= 2: score += 5
 
     score = min(99, max(0, round(score)))
 
     # ── Mode recommendation ───────────────────────────────────────────
     hold_days = whale_item.get('hold_days', 14) if whale_item else 14
-    best_tech  = tech.get('best_mode', 'swing') if tech else 'swing'
-    vol        = tech.get('daily_vol', 2.0) if tech else 2.0
+    vol       = float(tech.get('daily_vol', 2.0) or 2.0) if tech else 2.0
 
-    if hold_days >= 90:   rec_mode = 'longterm'
+    if   hold_days >= 90: rec_mode = 'longterm'
     elif hold_days >= 14: rec_mode = 'swing'
     else:                 rec_mode = 'day'
-
-    # Override: very high volatility → always day trade
     if vol > 6: rec_mode = 'day'
 
     return {

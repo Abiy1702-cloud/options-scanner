@@ -590,14 +590,21 @@ canvas.main-chart{width:100%;display:block}
         <button class="tf-btn" onclick="setResTF('2y','1wk',this)">2Y</button>
       </div>
       <div class="chart-outer">
-        <canvas id="res-chart" class="main-chart" style="height:220px"></canvas>
-        <div class="chart-legend">
-          <div class="cl-item"><div class="cl-line" style="background:var(--warn)"></div>VWAP</div>
-          <div class="cl-item"><div class="cl-line" style="background:var(--live)"></div>EMA9</div>
-          <div class="cl-item"><div class="cl-line" style="background:#7a9ab5"></div>EMA20</div>
-          <div class="cl-item"><div class="cl-line" style="background:var(--purple)"></div>EMA50</div>
-          <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.35);width:14px"></div>BB</div>
-          <div class="cl-item"><div class="cl-line" style="background:var(--buy);border-top:1px dashed var(--buy)"></div>Prediction</div>
+        <canvas id="res-chart" class="main-chart" style="height:260px"></canvas>
+        <div class="chart-legend" style="flex-wrap:wrap;gap:6px 12px;padding:6px 8px">
+          <div class="cl-item"><div class="cl-line" style="background:#ffb020;height:2px"></div><span style="color:#ffb020;font-weight:700">VWAP</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#00d4ff;height:2px"></div><span style="color:#00d4ff">EMA9</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#7a9ab5;height:2px"></div><span style="color:#7a9ab5">EMA20</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#b366ff;height:1px;border-top:1px dashed #b366ff"></div><span style="color:#b366ff">EMA50</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.4);width:14px"></div><span style="color:#b366ff">BB Bands</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#00ff88;border-top:2px dashed #00ff88"></div><span style="color:#00ff88;font-weight:700">▲ Prediction</span></div>
+          <div class="cl-item" style="width:100%;margin-top:3px;border-top:1px solid rgba(255,255,255,.06);padding-top:3px">
+            <span style="color:#00ff88;font-size:9px;font-weight:700">━━ SUPPORT</span>&nbsp;&nbsp;
+            <span style="color:#ff3355;font-size:9px;font-weight:700">━━ RESISTANCE</span>&nbsp;&nbsp;
+            <span style="color:#00d4ff;font-size:9px">── CURRENT PRICE</span>&nbsp;&nbsp;
+            <span style="color:#00ff88;font-size:9px">● L=Swing Low</span>&nbsp;&nbsp;
+            <span style="color:#ff3355;font-size:9px">● H=Swing High</span>
+          </div>
         </div>
       </div>
     </div>
@@ -962,12 +969,17 @@ function renderTradeCards() {
             <div class="chart-info-overlay" id="ci-${t.id}"></div>
             <div class="chart-sig-overlay" id="cs-${t.id}"></div>
           </div>
-          <div class="chart-legend">
-            <div class="cl-item"><div class="cl-line" style="background:var(--warn)"></div>VWAP</div>
-            <div class="cl-item"><div class="cl-line" style="background:var(--live)"></div>EMA9</div>
-            <div class="cl-item"><div class="cl-line" style="background:#7a9ab5"></div>EMA20</div>
-            <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.45);width:12px"></div>BB</div>
-            <div class="cl-item"><div class="cl-line" style="background:var(--buy);height:1px;border-top:1px dashed var(--buy)"></div>Pred</div>
+          <div class="chart-legend" style="flex-wrap:wrap;gap:4px 10px">
+            <div class="cl-item"><div class="cl-line" style="background:#ffb020;height:2px"></div><span style="color:#ffb020;font-weight:700">VWAP</span></div>
+            <div class="cl-item"><div class="cl-line" style="background:#00d4ff;height:2px"></div><span style="color:#00d4ff">EMA9</span></div>
+            <div class="cl-item"><div class="cl-line" style="background:#7a9ab5;height:2px"></div><span style="color:#7a9ab5">EMA20</span></div>
+            <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.45);width:12px"></div><span style="color:#b366ff">BB</span></div>
+            <div class="cl-item"><div class="cl-line" style="background:#00ff88;border-top:2px dashed #00ff88"></div><span style="color:#00ff88">Pred ▲</span></div>
+            <div class="cl-item" style="width:100%">
+              <span style="color:#00ff88;font-size:8px">━ SUPPORT</span>&nbsp;&nbsp;
+              <span style="color:#ff3355;font-size:8px">━ RESISTANCE</span>&nbsp;&nbsp;
+              <span style="color:#00d4ff;font-size:8px">── ENTRY/TARGET/STOP</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1100,12 +1112,21 @@ function renderOptCard(c,d) {
         <button class="ctb-btn" onclick="loadOptChart('${c.symbol}','3mo','1d',this)">3M</button>
       </div>
       <canvas id="opc-canvas-${c.symbol}" style="width:100%;height:160px;display:block;background:var(--deep);border-radius:6px"></canvas>
-      <div class="chart-legend" style="margin-top:4px">
-        <div class="cl-item"><div class="cl-line" style="background:var(--warn)"></div>VWAP</div>
-        <div class="cl-item"><div class="cl-line" style="background:var(--live)"></div>9EMA</div>
-        <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.45);width:12px"></div>BB</div>
-        <div class="cl-item"><div class="cl-line" style="background:var(--buy);height:1px;border-top:1px dashed var(--buy)"></div>Pred</div>
-      </div>
+      <div class="chart-legend" style="flex-wrap:wrap;gap:6px 12px;padding:6px 8px">
+          <div class="cl-item"><div class="cl-line" style="background:#ffb020;height:2px"></div><span style="color:#ffb020;font-weight:700">VWAP</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#00d4ff;height:2px"></div><span style="color:#00d4ff">EMA9</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#7a9ab5;height:2px"></div><span style="color:#7a9ab5">EMA20</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#b366ff;height:1px;border-top:1px dashed #b366ff"></div><span style="color:#b366ff">EMA50</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.4);width:14px"></div><span style="color:#b366ff">BB Bands</span></div>
+          <div class="cl-item"><div class="cl-line" style="background:#00ff88;border-top:2px dashed #00ff88"></div><span style="color:#00ff88;font-weight:700">▲ Prediction</span></div>
+          <div class="cl-item" style="width:100%;margin-top:3px;border-top:1px solid rgba(255,255,255,.06);padding-top:3px">
+            <span style="color:#00ff88;font-size:9px;font-weight:700">━━ SUPPORT</span>&nbsp;&nbsp;
+            <span style="color:#ff3355;font-size:9px;font-weight:700">━━ RESISTANCE</span>&nbsp;&nbsp;
+            <span style="color:#00d4ff;font-size:9px">── CURRENT PRICE</span>&nbsp;&nbsp;
+            <span style="color:#00ff88;font-size:9px">● L=Swing Low</span>&nbsp;&nbsp;
+            <span style="color:#ff3355;font-size:9px">● H=Swing High</span>
+          </div>
+        </div>
     </div>
     <div style="font-size:8px;color:var(--t3);font-family:var(--ui);margin-top:5px">📊 5x leverage sim model — not real options data</div>
   </div>`;
@@ -1380,124 +1401,252 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
 
   const PL=2,PR=52,PT=8,PB=20, PW=W-PL-PR, PH=h-PT-PB;
 
-  // Collect Y range
-  let allV=bars.flatMap(b=>[b.h,b.l]);
+  // ── Y range: price only (keep indicators in view) ────────
+  const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
+  let HI=Math.max(...priceVals), LO=Math.min(...priceVals);
+  // Expand range to include indicator series only slightly
   if(tech){
+    const indVals=[];
     ['vwap_series','ema9_series','ema20_series','ema50_series','bb_upper_series','bb_lower_series'].forEach(k=>{
-      if(tech[k]) allV.push(...tech[k].filter(Boolean));
+      if(tech[k]) tech[k].filter(v=>v&&isFinite(v)&&v>LO*.85&&v<HI*1.15).forEach(v=>indVals.push(v));
     });
-    if(showPred&&tech.pred_series) allV.push(...tech.pred_series.filter(v=>v>0));
+    if(indVals.length){HI=Math.max(HI,...indVals);LO=Math.min(LO,...indVals);}
+    if(showPred&&tech.pred_series){
+      const pv=tech.pred_series.filter(v=>v&&isFinite(v)&&v>LO*.85&&v<HI*1.15);
+      if(pv.length){HI=Math.max(HI,...pv);LO=Math.min(LO,...pv);}
+    }
   }
-  const HI=Math.max(...allV), LO=Math.min(...allV.filter(v=>v>0)), RNG=(HI-LO)||1;
+  const PAD=(HI-LO)*0.08; HI+=PAD; LO-=PAD;
+  const RNG=(HI-LO)||1;
   const fy=v=>PT+PH-((v-LO)/RNG*PH);
   const cw=PW/Math.max(bars.length,1);
 
-  // ── Grid ──────────────────────────────────────────────
-  ctx.strokeStyle='rgba(255,255,255,.035)'; ctx.lineWidth=.5;
-  for(let i=0;i<=4;i++){
-    const v=LO+RNG*i/4, y=fy(v);
-    ctx.beginPath(); ctx.moveTo(PL,y); ctx.lineTo(W-PR,y); ctx.stroke();
-    ctx.fillStyle='#3d5a72'; ctx.font='7px Inter';
+  // ── Volume panel setup ────────────────────────────────
+  const volTop = h + 2;       // 2px gap below price chart
+  const volPH  = volH - 6;    // usable volume height
+  const maxVol = Math.max(...bars.map(b=>b.v||0))||1;
+  const fvol   = v => volTop + volPH - (v/maxVol*volPH);
+
+  // ── Dark background for chart area ───────────────────
+  ctx.fillStyle='#080f17'; ctx.fillRect(0,0,W,h+volH);
+
+  // ── Grid lines ────────────────────────────────────────
+  ctx.strokeStyle='rgba(255,255,255,.04)'; ctx.lineWidth=.5;
+  for(let i=0;i<=5;i++){
+    const v=LO+RNG*i/5, y=fy(v);
+    ctx.beginPath();ctx.moveTo(PL,y);ctx.lineTo(W-PR,y);ctx.stroke();
+    ctx.fillStyle='#4a6359';ctx.font='bold 8px Inter';
     ctx.fillText('$'+v.toFixed(2),W-PR+3,y+3);
   }
+  // Time labels
   const step=Math.max(1,Math.floor(bars.length/6));
-  bars.forEach((b,i)=>{ if(i%step===0&&b.hm){ctx.fillStyle='#3d5a72';ctx.font='7px Inter';ctx.fillText(b.hm,PL+i*cw,h-4);}});
+  bars.forEach((b,i)=>{
+    if(i%step===0&&b.hm){ctx.fillStyle='#3d5a72';ctx.font='8px Inter';ctx.fillText(b.hm,PL+i*cw,h-2);}
+  });
 
-  // ── Bollinger fill ────────────────────────────────────
+  // ── Volume separator line ─────────────────────────────
+  ctx.strokeStyle='rgba(255,255,255,.08)';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(PL,volTop);ctx.lineTo(W-PR,volTop);ctx.stroke();
+  ctx.fillStyle='#3d5a72';ctx.font='7px Inter';ctx.fillText('VOL',W-PR+3,volTop+10);
+
+  // ── Bollinger Bands fill ──────────────────────────────
   if(tech&&tech.bb_upper_series&&tech.bb_lower_series&&tech.bb_upper_series.length===bars.length){
     ctx.beginPath();
-    tech.bb_upper_series.forEach((v,i)=>{const x=PL+i*cw+cw/2;i===0?ctx.moveTo(x,fy(v)):ctx.lineTo(x,fy(v));});
-    tech.bb_lower_series.slice().reverse().forEach((v,i)=>{const ri=tech.bb_lower_series.length-1-i;ctx.lineTo(PL+ri*cw+cw/2,fy(v));});
-    ctx.closePath(); ctx.fillStyle='rgba(179,102,255,.06)'; ctx.fill();
-    ctx.strokeStyle='rgba(179,102,255,.18)'; ctx.lineWidth=.6;
-    const dl=(s)=>{ctx.beginPath();s.forEach((v,i)=>{const x=PL+i*cw+cw/2;i===0?ctx.moveTo(x,fy(v)):ctx.lineTo(x,fy(v));});ctx.stroke();};
-    dl(tech.bb_upper_series); dl(tech.bb_lower_series);
+    tech.bb_upper_series.forEach((v,i)=>{if(!v||!isFinite(v))return;const x=PL+i*cw+cw/2;i===0?ctx.moveTo(x,fy(v)):ctx.lineTo(x,fy(v));});
+    tech.bb_lower_series.slice().reverse().forEach((v,i)=>{if(!v||!isFinite(v))return;const ri=tech.bb_lower_series.length-1-i;ctx.lineTo(PL+ri*cw+cw/2,fy(v));});
+    ctx.closePath();ctx.fillStyle='rgba(179,102,255,.07)';ctx.fill();
+    ctx.strokeStyle='rgba(179,102,255,.25)';ctx.lineWidth=1;
+    const dlBB=(s)=>{ctx.beginPath();let f=true;s.forEach((v,i)=>{if(!v||!isFinite(v))return;const x=PL+i*cw+cw/2,y=fy(v);f?(ctx.moveTo(x,y),f=false):ctx.lineTo(x,y);});ctx.stroke();};
+    dlBB(tech.bb_upper_series);dlBB(tech.bb_lower_series);
+    // BB label on right
+    const bbu=tech.bb_upper_series[tech.bb_upper_series.length-1];
+    const bbl=tech.bb_lower_series[tech.bb_lower_series.length-1];
+    if(bbu&&isFinite(bbu)){ctx.fillStyle='rgba(179,102,255,.7)';ctx.font='7px Inter';ctx.fillText('BB+',W-PR+3,fy(bbu)+3);}
+    if(bbl&&isFinite(bbl)){ctx.fillStyle='rgba(179,102,255,.7)';ctx.font='7px Inter';ctx.fillText('BB-',W-PR+3,fy(bbl)+3);}
   }
 
-  // ── Support / Resistance zones ────────────────────────
-  if(tech){
-    if(tech.support){ctx.fillStyle='rgba(0,255,136,.06)';ctx.fillRect(PL,fy(tech.support*1.005),PW,fy(tech.support*.994)-fy(tech.support*1.005));}
-    if(tech.resistance){ctx.fillStyle='rgba(255,51,85,.05)';ctx.fillRect(PL,fy(tech.resistance*1.006),PW,fy(tech.resistance*.995)-fy(tech.resistance*1.006));}
+  // ── Support zone (green) ──────────────────────────────
+  if(tech&&tech.support&&isFinite(tech.support)){
+    const sy=fy(tech.support), sy2=fy(tech.support*0.993);
+    ctx.fillStyle='rgba(0,255,136,.08)';ctx.fillRect(PL,sy,PW,sy2-sy);
+    ctx.strokeStyle='rgba(0,255,136,.5)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
+    ctx.beginPath();ctx.moveTo(PL,sy);ctx.lineTo(W-PR,sy);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#00ff88';ctx.font='bold 8px Inter';
+    ctx.fillText('SUPPORT $'+tech.support.toFixed(2),PL+4,sy-4);
+    ctx.fillText('$'+tech.support.toFixed(2),W-PR+3,sy+3);
   }
+
+  // ── Resistance zone (red) ─────────────────────────────
+  if(tech&&tech.resistance&&isFinite(tech.resistance)){
+    const ry=fy(tech.resistance), ry2=fy(tech.resistance*1.007);
+    ctx.fillStyle='rgba(255,51,85,.07)';ctx.fillRect(PL,ry2,PW,ry-ry2);
+    ctx.strokeStyle='rgba(255,51,85,.55)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
+    ctx.beginPath();ctx.moveTo(PL,ry);ctx.lineTo(W-PR,ry);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#ff3355';ctx.font='bold 8px Inter';
+    ctx.fillText('RESISTANCE $'+tech.resistance.toFixed(2),PL+4,ry-4);
+    ctx.fillText('$'+tech.resistance.toFixed(2),W-PR+3,ry+3);
+  }
+
+  // ── Volume bars ───────────────────────────────────────
+  bars.forEach((b,i)=>{
+    const x=PL+i*cw; const bw=Math.max(cw-1,1);
+    const up=b.c>=b.o;
+    ctx.fillStyle=up?'rgba(0,255,136,.35)':'rgba(255,51,85,.3)';
+    const top=fvol(b.v||0);
+    ctx.fillRect(x,top,bw,volTop+volPH-top);
+  });
 
   // ── Candles ───────────────────────────────────────────
   bars.forEach((b,i)=>{
-    const x=PL+i*cw+cw/2, up=b.c>=b.o;
-    const clr=up?'#00ff88':'#ff3355';
-    ctx.strokeStyle=clr; ctx.fillStyle=clr; ctx.lineWidth=.8;
-    ctx.beginPath(); ctx.moveTo(x,fy(b.h)); ctx.lineTo(x,fy(b.l)); ctx.stroke();
+    const x=PL+i*cw+cw/2,up=b.c>=b.o;
+    ctx.strokeStyle=up?'#00ff88':'#ff3355';ctx.fillStyle=up?'#00ff88':'#ff3355';ctx.lineWidth=.8;
+    ctx.beginPath();ctx.moveTo(x,fy(b.h));ctx.lineTo(x,fy(b.l));ctx.stroke();
     const bw=Math.max(Math.floor(cw*.72),1);
     ctx.fillRect(x-bw/2,Math.min(fy(b.o),fy(b.c)),bw,Math.max(Math.abs(fy(b.c)-fy(b.o)),1));
   });
 
   // ── Indicator lines ───────────────────────────────────
-  const line=(s,col,lw=1.1,dash=[])=>{
+  const line=(s,color,lw=1.2,dash=[],label='',labelColor='')=>{
     if(!s||!s.length)return;
-    ctx.strokeStyle=col;ctx.lineWidth=lw;ctx.setLineDash(dash);ctx.beginPath();
+    ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash(dash);ctx.beginPath();
     let first=true;
-    s.forEach((v,i)=>{if(!v||v<LO*.8||v>HI*1.2)return;const x=PL+i*cw+cw/2,y=fy(v);first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);});
+    s.forEach((v,i)=>{
+      if(!v||!isFinite(v)||v<LO*.7||v>HI*1.3)return;
+      const x=PL+i*cw+cw/2,y=fy(v);first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);
+    });
     ctx.stroke();ctx.setLineDash([]);
+    // Label at right edge
+    if(label){
+      const last=s.filter(v=>v&&isFinite(v)&&v>LO*.7&&v<HI*1.3).pop();
+      if(last){
+        ctx.fillStyle=labelColor||color;ctx.font='bold 7px Inter';
+        ctx.fillText(label+' $'+last.toFixed(2),W-PR+3,fy(last)+3);
+      }
+    }
   };
   if(tech){
-    line(tech.vwap_series,'#ffb020',1.3);
-    line(tech.ema9_series,'#00d4ff',1.1);
-    line(tech.ema20_series,'#7a9ab5',.9);
-    line(tech.ema50_series,'rgba(179,102,255,.7)',.9,[3,3]);
+    line(tech.vwap_series, '#ffb020',1.5,[],'VWAP','#ffb020');
+    line(tech.ema9_series, '#00d4ff',1.2,[],'EMA9','#00d4ff');
+    line(tech.ema20_series,'#7a9ab5',1.0,[],'EMA20','#7a9ab5');
+    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'EMA50','#b366ff');
   }
 
-  // ── Trade entry line ──────────────────────────────────
-  if(trade&&trade.entry){
-    const ey=fy(trade.entry);
-    ctx.strokeStyle='rgba(0,212,255,.6)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
-    ctx.beginPath();ctx.moveTo(PL,ey);ctx.lineTo(W-PR,ey);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='rgba(0,212,255,.9)';ctx.font='bold 8px Inter';ctx.fillText('ENTRY',W-PR+3,ey-2);
-    if(trade.target){const ty=fy(trade.target);ctx.strokeStyle='rgba(0,255,136,.5)';ctx.setLineDash([2,4]);ctx.beginPath();ctx.moveTo(PL,ty);ctx.lineTo(W-PR,ty);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='var(--buy)';ctx.fillText('TARGET',W-PR+3,ty-2);}
-    if(trade.stop){const sy=fy(trade.stop);ctx.strokeStyle='rgba(255,51,85,.5)';ctx.setLineDash([2,4]);ctx.beginPath();ctx.moveTo(PL,sy);ctx.lineTo(W-PR,sy);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='var(--sell)';ctx.fillText('STOP',W-PR+3,sy-2);}
+  // ── Trade entry / target / stop lines ─────────────────
+  if(trade&&trade.entry&&isFinite(trade.entry)){
+    const drawHL=(y,col,lbl)=>{
+      ctx.strokeStyle=col;ctx.lineWidth=1.2;ctx.setLineDash([4,4]);
+      ctx.beginPath();ctx.moveTo(PL,y);ctx.lineTo(W-PR,y);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle=col;ctx.font='bold 8px Inter';ctx.fillText(lbl,W-PR+3,y+3);
+    };
+    drawHL(fy(trade.entry),'rgba(0,212,255,.9)','ENTRY $'+trade.entry.toFixed(2));
+    if(trade.target&&isFinite(trade.target)) drawHL(fy(trade.target),'rgba(0,255,136,.9)','TARGET $'+trade.target.toFixed(2));
+    if(trade.stop&&isFinite(trade.stop))     drawHL(fy(trade.stop),'rgba(255,51,85,.9)','STOP $'+trade.stop.toFixed(2));
   }
 
-  // ── Prediction extension ──────────────────────────────
+  // ── Prediction channel (prominent dashed line) ────────
   if(showPred&&tech&&tech.pred_series&&tech.close_series){
-    const histLen=tech.close_series.length;
-    const preds=tech.pred_series;
-    // Historical trend
-    ctx.strokeStyle='rgba(179,102,255,.3)';ctx.lineWidth=.9;ctx.setLineDash([2,5]);
-    ctx.beginPath();let ff=true;
-    preds.slice(0,histLen).forEach((v,i)=>{if(!v)return;const x=PL+i*cw+cw/2,y=fy(v);ff?(ctx.moveTo(x,y),ff=false):ctx.lineTo(x,y);});
-    ctx.stroke();
-    // Future dashes
-    const fut=preds.slice(histLen);
-    if(fut.length){
-      const lastX=PL+(histLen-1)*cw+cw/2;
-      const lastY=fy(preds[histLen-1]||bars[bars.length-1].c);
-      const futW=Math.min(PW*0.22, PW-lastX+PL);
-      ctx.strokeStyle='#00ff88';ctx.lineWidth=1.3;ctx.setLineDash([5,5]);
-      ctx.beginPath();ctx.moveTo(lastX,lastY);
-      fut.forEach((v,i)=>{if(!v)return;ctx.lineTo(lastX+(i+1)*futW/fut.length,fy(v));});
+    const histLen=tech.close_series.filter(v=>v&&isFinite(v)).length;
+    const preds=tech.pred_series.filter(v=>isFinite(v));
+    if(preds.length>0){
+      // Historical regression line (subtle purple dashes through chart)
+      ctx.strokeStyle='rgba(179,102,255,.35)';ctx.lineWidth=1;ctx.setLineDash([3,6]);
+      ctx.beginPath();let ff=true;
+      preds.slice(0,histLen).forEach((v,i)=>{
+        if(!v||!isFinite(v)||v<LO*.85||v>HI*1.15)return;
+        const x=PL+i*cw+cw/2,y=fy(v);ff?(ctx.moveTo(x,y),ff=false):ctx.lineTo(x,y);
+      });
       ctx.stroke();ctx.setLineDash([]);
-      // Arrow + price tag
-      const endX=lastX+futW,endY=fy(fut[fut.length-1]||bars[bars.length-1].c);
-      const up=fut[fut.length-1]>(preds[histLen-1]||bars[bars.length-1].c);
-      ctx.fillStyle='#00ff88';ctx.font='bold 8px Inter';ctx.fillText((up?'▲':'▼')+'$'+(fut[fut.length-1]||0).toFixed(2),Math.min(endX-2,W-PR-2),endY+(up?-4:12));
+
+      // Future prediction — bright, wide, clearly labeled
+      const fut=preds.slice(histLen).filter(v=>v&&isFinite(v));
+      if(fut.length>0){
+        const lastI=histLen-1;
+        const lastX=PL+Math.min(lastI,bars.length-1)*cw+cw/2;
+        const lastPredV=preds[histLen-1]||bars[bars.length-1].c;
+        const lastY=isFinite(lastPredV)?fy(lastPredV):fy(bars[bars.length-1].c);
+        // Extend prediction 25% of chart width into the future zone
+        const futZoneW=Math.min(PW*0.25, PW-lastX+PL+4);
+        const endX=lastX+futZoneW;
+        const endV=fut[fut.length-1];
+        const endY=isFinite(endV)&&endV>LO*.85&&endV<HI*1.15?fy(endV):lastY;
+        const going_up=endV>lastPredV;
+
+        // Shaded prediction zone
+        ctx.fillStyle=going_up?'rgba(0,255,136,.06)':'rgba(255,51,85,.05)';
+        ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(endX,endY-8);ctx.lineTo(endX,endY+8);ctx.closePath();ctx.fill();
+
+        // Prediction line — thick, bright green/red
+        ctx.strokeStyle=going_up?'#00ff88':'#ff3355';ctx.lineWidth=2;ctx.setLineDash([7,4]);
+        ctx.beginPath();ctx.moveTo(lastX,lastY);
+        fut.forEach((v,i)=>{
+          if(!v||!isFinite(v))return;
+          const x=lastX+(i+1)*futZoneW/fut.length;
+          const y=v>LO*.85&&v<HI*1.15?fy(v):lastY;
+          ctx.lineTo(x,y);
+        });
+        ctx.stroke();ctx.setLineDash([]);
+
+        // Big prediction label box
+        const arrow=going_up?'▲':'▼';
+        const pLabel=arrow+' PRED $'+endV.toFixed(2);
+        ctx.font='bold 10px Inter';
+        const tw=ctx.measureText(pLabel).width;
+        const lx=Math.min(endX-2, W-PR-tw-4);
+        const ly2=endY+(going_up?-16:8);
+        ctx.fillStyle=going_up?'rgba(0,255,136,.15)':'rgba(255,51,85,.15)';
+        ctx.fillRect(lx-2,ly2-11,tw+6,14);
+        ctx.fillStyle=going_up?'#00ff88':'#ff3355';
+        ctx.fillText(pLabel,lx,ly2);
+
+        // Vertical dotted line at prediction boundary
+        ctx.strokeStyle='rgba(255,255,255,.12)';ctx.lineWidth=.8;ctx.setLineDash([2,4]);
+        ctx.beginPath();ctx.moveTo(lastX,PT);ctx.lineTo(lastX,h-PB);ctx.stroke();ctx.setLineDash([]);
+        ctx.fillStyle='rgba(255,255,255,.3)';ctx.font='7px Inter';
+        ctx.fillText('NOW',lastX-10,PT+8);
+      }
     }
   }
 
-  // ── Supply/demand annotation dots ────────────────────
-  if(tech&&bars.length>20){
-    // Mark swing highs / lows
-    for(let i=2;i<bars.length-2;i++){
+  // ── Swing high/low dots (supply/demand) ───────────────
+  if(tech&&bars.length>10){
+    for(let i=3;i<bars.length-3;i++){
       const isHigh=bars[i].h>bars[i-1].h&&bars[i].h>bars[i-2].h&&bars[i].h>bars[i+1].h&&bars[i].h>bars[i+2].h;
-      const isLow=bars[i].l<bars[i-1].l&&bars[i].l<bars[i-2].l&&bars[i].l<bars[i+1].l&&bars[i].l<bars[i+2].l;
-      if(isHigh&&bars.length-i<40){const x=PL+i*cw+cw/2;ctx.fillStyle='rgba(255,51,85,.7)';ctx.beginPath();ctx.arc(x,fy(bars[i].h)-4,2.5,0,Math.PI*2);ctx.fill();}
-      if(isLow&&bars.length-i<40){const x=PL+i*cw+cw/2;ctx.fillStyle='rgba(0,255,136,.7)';ctx.beginPath();ctx.arc(x,fy(bars[i].l)+4,2.5,0,Math.PI*2);ctx.fill();}
+      const isLow= bars[i].l<bars[i-1].l&&bars[i].l<bars[i-2].l&&bars[i].l<bars[i+1].l&&bars[i].l<bars[i+2].l;
+      if(isHigh){
+        const x=PL+i*cw+cw/2,y=fy(bars[i].h)-5;
+        ctx.fillStyle='rgba(255,51,85,.85)';ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
+        if(i>bars.length-15){ctx.fillStyle='rgba(255,51,85,.6)';ctx.font='7px Inter';ctx.fillText('H',x-3,y-4);}
+      }
+      if(isLow){
+        const x=PL+i*cw+cw/2,y=fy(bars[i].l)+5;
+        ctx.fillStyle='rgba(0,255,136,.85)';ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
+        if(i>bars.length-15){ctx.fillStyle='rgba(0,255,136,.6)';ctx.font='7px Inter';ctx.fillText('L',x-3,y+10);}
+      }
     }
   }
 
-  // ── Last price horizontal ─────────────────────────────
+  // ── VWAP label (above VWAP = bullish zone) ────────────
+  if(tech&&tech.vwap&&isFinite(tech.vwap)&&bars.length){
+    const lp=bars[bars.length-1].c;
+    const vwapY=fy(tech.vwap);
+    const aboveVwap=lp>tech.vwap;
+    // Shade VWAP zone
+    ctx.fillStyle=aboveVwap?'rgba(0,255,136,.03)':'rgba(255,51,85,.03)';
+    ctx.fillRect(PL,aboveVwap?fy(lp):vwapY,PW,aboveVwap?vwapY-fy(lp):fy(lp)-vwapY);
+  }
+
+  // ── Current price line ────────────────────────────────
   if(bars.length){
-    const lp=bars[bars.length-1].c,ly=fy(lp);
-    ctx.strokeStyle='rgba(255,255,255,.15)';ctx.setLineDash([2,5]);ctx.lineWidth=.8;
-    ctx.beginPath();ctx.moveTo(PL,ly);ctx.lineTo(W-PR,ly);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='rgba(240,212,255,.8)';ctx.font='bold 8px Inter';ctx.fillText('$'+lp.toFixed(2),W-PR+3,ly+3);
+    const lp=bars[bars.length-1].c;
+    if(isFinite(lp)){
+      const ly=fy(lp);
+      ctx.strokeStyle='rgba(255,255,255,.2)';ctx.setLineDash([3,5]);ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(PL,ly);ctx.lineTo(W-PR,ly);ctx.stroke();ctx.setLineDash([]);
+      // Price badge box
+      ctx.fillStyle='rgba(0,212,255,.2)';ctx.fillRect(W-PR+1,ly-8,PR-2,14);
+      ctx.fillStyle='#00d4ff';ctx.font='bold 9px Inter';
+      ctx.fillText('$'+lp.toFixed(2),W-PR+3,ly+3);
+    }
   }
 }
 
