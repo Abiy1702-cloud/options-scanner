@@ -124,7 +124,7 @@ html,body{height:100%;overflow:hidden;background:var(--void);color:var(--text);f
 .pf-win{background:linear-gradient(90deg,var(--buy),var(--buy2))}
 .pf-loss{background:linear-gradient(90deg,var(--sell),var(--sell2))}
 /* Chart embed in trade card */
-.tw-chart-wrap{display:none;border-top:1px solid var(--border)}
+.tw-chart-wrap{display:none;border-top:1px solid var(--border);padding:8px}
 .tw-chart-wrap.open{display:block}
 /* Buttons */
 .tw-btns{display:flex;gap:5px;padding:0 11px 10px}
@@ -610,10 +610,11 @@ canvas.main-chart{width:100%;display:block}
       <span class="chat-ai-src" id="res-ai-src">Groq · llama-3.3-70b</span>
     </div>
     <div class="quick-qs" id="res-quick-qs">
-      <span class="qq" onclick="resQ('Is this a good entry right now?')">Good entry?</span>
-      <span class="qq" onclick="resQ('What is the 30-day price target?')">30-day target?</span>
-      <span class="qq" onclick="resQ('Day trade or swing trade for this?')">Day or swing?</span>
-      <span class="qq" onclick="resQ('What are the main risks?')">Main risks?</span>
+      <span class="qq" onclick="resQ('Is '+currentResSym+' a good entry right now based on RSI and VWAP?')">Good entry?</span>
+      <span class="qq" onclick="resQ('What is the 30-day price target for '+currentResSym+'?')">30D target?</span>
+      <span class="qq" onclick="resQ('Should I day trade or swing trade '+currentResSym+'?')">Day or swing?</span>
+      <span class="qq" onclick="resQ('What are the main risks of trading '+currentResSym+' right now?')">Risks?</span>
+      <span class="qq" onclick="resQ('What does the RSI and MACD tell us about '+currentResSym+' momentum?')">Momentum?</span>
     </div>
     <div class="chat-msgs" id="res-chat"></div>
     <div class="chat-inp-wrap">
@@ -945,7 +946,7 @@ function renderTradeCards() {
       </div>
       <div class="tw-btns">
         <button class="btn-close-trade" onclick="closeTrade('${t.id}','${t.symbol}')">✕ Close ${t.symbol}</button>
-        <button class="btn-chart-toggle" onclick="toggleTradeChart('${t.id}','${t.symbol}')">📊 Chart</button>
+        <button class="btn-chart-toggle" id="chart-btn-${t.id}" onclick="toggleTradeChart('${t.id}','${t.symbol}');this.textContent=document.getElementById('tc-${t.id}')?.classList.contains('open')?'▲ Hide Chart':'📊 Chart'">📊 Chart</button>
         <button class="btn-ai" onclick="tradeQ('Analyze my ${t.symbol} trade: entered $${t.entry.toFixed(2)}, now $${cur.toFixed(2)}, P&L ${fmtP(pct)}. Should I hold or close?')">🤖 AI</button>
       </div>
       <div class="tw-chart-wrap" id="tc-${t.id}">
@@ -986,7 +987,20 @@ async function closeTrade(id, sym) {
 async function toggleTradeChart(id, sym) {
   const wrap=$('tc-'+id); if(!wrap) return;
   const open=wrap.classList.toggle('open');
-  if(open) await loadTradeChart(id,sym,'1d','5m',null);
+  if(open) {
+    // Show loading inside chart
+    const canvas=$('c-'+id);
+    if(canvas){
+      const dpr=window.devicePixelRatio||1,W=canvas.clientWidth||360;
+      canvas.width=W*dpr;canvas.height=160*dpr;
+      canvas.style.width=W+'px';canvas.style.height='160px';
+      const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);
+      ctx.fillStyle='#0c1520';ctx.fillRect(0,0,W,160);
+      ctx.fillStyle='#3d5a72';ctx.font='11px Inter';
+      ctx.fillText('Loading chart for '+sym+'...',W/2-60,80);
+    }
+    await loadTradeChart(id,sym,'1d','5m',null);
+  }
 }
 async function loadTradeChart(id, sym, period, interval, btn) {
   if(btn) { const tb=$('ctb-'+id); if(tb) tb.querySelectorAll('.ctb-btn').forEach(b=>b.classList.remove('on')); btn.classList.add('on'); }
@@ -1068,7 +1082,32 @@ function renderOptCard(c,d) {
     <div class="oc-prog"><div class="oc-prog-fill" style="width:${pBar}%;background:${pos?'linear-gradient(90deg,var(--purple),var(--live))':'linear-gradient(90deg,var(--sell),var(--sell2))'}"></div></div>
     <div style="display:flex;justify-content:space-between;font-size:7px;font-family:var(--ui);color:var(--t3)"><span>-25% stop</span><span>${c.entry_time||''}</span><span>+35% target</span></div>
     <div style="font-size:8px;color:var(--t2);font-family:var(--ui);margin-top:5px;line-height:1.5">${c.reason||''}</div>
-    <div style="font-size:7px;color:var(--t3);font-family:var(--ui);margin-top:4px">📊 5x leverage sim model — not real options data</div>
+    <div style="display:flex;gap:5px;margin-top:8px">
+      <button onclick="toggleOptChart('${c.symbol}')" id="opc-btn-${c.symbol}"
+        style="flex:1;background:rgba(0,212,255,.07);border:1px solid rgba(0,212,255,.2);color:var(--live);border-radius:6px;padding:7px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--ui)">
+        📊 Chart + Details
+      </button>
+      <button onclick="quickR('${c.symbol}')"
+        style="background:rgba(179,102,255,.07);border:1px solid rgba(179,102,255,.2);color:var(--purple);border-radius:6px;padding:7px 10px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--ui)">
+        🔬 AI
+      </button>
+    </div>
+    <div id="opc-chart-${c.symbol}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+      <div style="display:flex;gap:3px;margin-bottom:5px" id="opc-tf-${c.symbol}">
+        <button class="ctb-btn on" onclick="loadOptChart('${c.symbol}','1d','5m',this)">1D</button>
+        <button class="ctb-btn" onclick="loadOptChart('${c.symbol}','5d','15m',this)">5D</button>
+        <button class="ctb-btn" onclick="loadOptChart('${c.symbol}','1mo','1h',this)">1M</button>
+        <button class="ctb-btn" onclick="loadOptChart('${c.symbol}','3mo','1d',this)">3M</button>
+      </div>
+      <canvas id="opc-canvas-${c.symbol}" style="width:100%;height:160px;display:block;background:var(--deep);border-radius:6px"></canvas>
+      <div class="chart-legend" style="margin-top:4px">
+        <div class="cl-item"><div class="cl-line" style="background:var(--warn)"></div>VWAP</div>
+        <div class="cl-item"><div class="cl-line" style="background:var(--live)"></div>9EMA</div>
+        <div class="cl-item"><div class="cl-line" style="background:rgba(179,102,255,.45);width:12px"></div>BB</div>
+        <div class="cl-item"><div class="cl-line" style="background:var(--buy);height:1px;border-top:1px dashed var(--buy)"></div>Pred</div>
+      </div>
+    </div>
+    <div style="font-size:8px;color:var(--t3);font-family:var(--ui);margin-top:5px">📊 5x leverage sim model — not real options data</div>
   </div>`;
 }
 
@@ -1084,35 +1123,73 @@ function quickR(sym) {
 async function runResearch() {
   const sym=($('res-sym').value||'').trim().toUpperCase().replace(/[^A-Z]/g,'');
   if(!sym)return; currentResSym=sym;
-  $('research-out').innerHTML=`<div class="card"><div class="spin-wrap"><div class="spin"></div><div class="spin-text">Deep analysis: ${sym}<br>RSI · VWAP · EMA · MACD · BB · ATR · Market Structure · AI Prediction...</div></div></div>`;
+  $('research-out').innerHTML=`<div class="card"><div class="spin-wrap"><div class="spin"></div><div class="spin-text">Analyzing ${sym}...<br><span style="font-size:10px;color:var(--t3)">RSI · VWAP · EMA · MACD · Bollinger Bands · ATR · AI Prediction</span></div></div></div>`;
   $('research-chart-section').style.display='none';
   try {
     await api('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})});
     clearInterval(researchPoll); let tries=0;
     researchPoll=setInterval(async()=>{
       tries++;
-      const d=await(await api('/analysis-result?symbol='+sym)).json();
-      // Show as soon as tech data is ready — even if AI is still running
-      if(d.ready&&d.result&&d.result.tech){
-        clearInterval(researchPoll);
-        renderResearch(d.result);
-        // If AI was still pending, poll once more to update
-        if(!d.result.analysis||d.result.ai_src==='pending'){
-          setTimeout(async()=>{
-            const d2=await(await api('/analysis-result?symbol='+sym)).json();
-            if(d2.result&&d2.result.analysis&&d2.result.ai_src!=='pending'){
-              const aiBox=document.querySelector('.ai-analysis');
-              if(aiBox) aiBox.textContent=d2.result.analysis;
+      try {
+        const d=await(await api('/analysis-result?symbol='+sym)).json();
+        // Resolve on ANY result — tech present, error state, or anything after 5 tries
+        const hasResult = d.ready && d.result;
+        const hasTech   = hasResult && d.result.tech;
+        const hasError  = hasResult && d.result.ai_src==='error';
+        const tiredWaiting = tries >= 8 && hasResult; // after 16s just show what we have
+
+        if(hasTech || hasError || tiredWaiting) {
+          clearInterval(researchPoll);
+          if(hasResult) {
+            renderResearch(d.result);
+            // If AI still pending, check again in 10s to fill in the analysis text
+            if(hasTech && (!d.result.analysis || d.result.ai_src==='pending')) {
+              setTimeout(async()=>{
+                try {
+                  const d2=await(await api('/analysis-result?symbol='+sym)).json();
+                  if(d2.result?.analysis && d2.result.ai_src!=='pending') {
+                    const aiBox=document.querySelector('.ai-analysis');
+                    if(aiBox) aiBox.textContent=d2.result.analysis;
+                    const aiLbl=document.querySelector('.ai-label');
+                    if(aiLbl) aiLbl.innerHTML='🤖 AI ANALYSIS — '+d2.result.ai_src;
+                  }
+                } catch(e){}
+              }, 10000);
             }
-          }, 8000);
+          } else {
+            $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">No data found for '+sym+'. Check the ticker and try again.</div></div>';
+          }
+          return;
         }
-      }
-      if(tries>25){ clearInterval(researchPoll); $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">Timed out — check server logs, then try again</div></div>'; }
+      } catch(pollErr){}
+      if(tries>30){ clearInterval(researchPoll); $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">Timed out for '+sym+'. The server may still be processing — try refreshing.</div></div>'; }
     },2000);
-  } catch(e){ toast('Research failed','err'); }
+  } catch(e){ toast('Research failed: '+e.message,'err'); }
 }
 
 async function renderResearch(r) {
+  // Handle error state — show what we have, don't crash
+  if(!r.tech && r.analysis) {
+    $('research-out').innerHTML=`
+      <div class="verdict-box vb-wait" style="margin-bottom:8px">
+        <div class="vb-top"><div>
+          <div class="vb-word" style="color:var(--warn)">🟡 LIMITED DATA</div>
+          <div class="vb-why">${r.analysis}</div>
+        </div></div>
+      </div>`;
+    $('research-chart-section').style.display='none';
+    // Still try to show a chart with daily data
+    try {
+      $('research-chart-section').style.display='block';
+      $('res-chart-sym').textContent=r.symbol;
+      await loadResChart(r.symbol,'3mo','1d',null);
+    } catch(e){}
+    return;
+  }
+  if(!r.tech) {
+    $('research-out').innerHTML='<div class="card"><div class="empty-state" style="color:var(--sell)">No data for '+r.symbol+' — try again during market hours or check the ticker.</div></div>';
+    return;
+  }
   const tech=r.tech||{}; const whale=r.whale; const rec=r.rec||{};
   const sig=tech.signal||'WAIT';
   const sigColor=sig==='BUY'?'var(--buy)':sig==='SELL'?'var(--sell)':'var(--warn)';
@@ -1446,8 +1523,10 @@ function rmTyping(cid){$('ty-'+cid)?.remove();}
 async function sendChat(inpId,chatId,sym=''){
   const inp=$(inpId); const msg=(inp.value||'').trim(); if(!msg)return;
   inp.value=''; addMsg(chatId,'u',msg); showTyping(chatId);
+  // Always use the most current research symbol if chatting in research tab
+  const effectiveSym = sym || (chatId==='res-chat'?currentResSym:'');
   try{
-    const d=await(await api('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,symbol:sym})})).json();
+    const d=await(await api('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,symbol:effectiveSym})})).json();
     rmTyping(chatId); addMsg(chatId,'a',d.response||'AI unavailable',d.src||'');
   }catch(e){rmTyping(chatId);addMsg(chatId,'a','AI unavailable — check GROQ_API_KEY on Render');}
 }
@@ -1459,6 +1538,52 @@ function progQ(msg){$('prog-inp').value=msg;sendChat('prog-inp','prog-chat','');
 // ══════════════════════════════════════════════════════════
 // BOOT + POLLING
 // ══════════════════════════════════════════════════════════
+async function toggleOptChart(sym) {
+  const wrap=document.getElementById('opc-chart-'+sym);
+  const btn=document.getElementById('opc-btn-'+sym);
+  if(!wrap) return;
+  const open = wrap.style.display==='none' || wrap.style.display==='';
+  wrap.style.display = open ? 'block' : 'none';
+  if(btn) btn.textContent = open ? '▲ Hide Chart' : '📊 Chart + Details';
+  if(open) await loadOptChart(sym,'1d','5m',null);
+}
+
+async function loadOptChart(sym, period, interval, btn) {
+  if(btn) {
+    const tf=document.getElementById('opc-tf-'+sym);
+    if(tf) tf.querySelectorAll('.ctb-btn').forEach(b=>b.classList.remove('on'));
+    btn.classList.add('on');
+  }
+  const canvas=document.getElementById('opc-canvas-'+sym);
+  if(!canvas) return;
+  // Loading state
+  const dpr=window.devicePixelRatio||1,W=canvas.clientWidth||360;
+  canvas.width=W*dpr;canvas.height=160*dpr;
+  canvas.style.width=W+'px';canvas.style.height='160px';
+  const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);
+  ctx.fillStyle='#0c1520';ctx.fillRect(0,0,W,160);
+  ctx.fillStyle='#3d5a72';ctx.font='11px Inter';
+  ctx.fillText('Loading '+sym+'...',W/2-40,80);
+  try {
+    const [cd,td]=await Promise.all([
+      api('/candles?symbol='+sym+'&period='+period+'&interval='+interval).then(r=>r.json()),
+      api('/technicals?symbol='+sym).then(r=>r.json())
+    ]);
+    const bars=cd.bars||[];
+    if(!bars.length) {
+      // fallback to daily
+      const fb=await api('/candles?symbol='+sym+'&period=3mo&interval=1d').then(r=>r.json());
+      drawChart(canvas,fb.bars||[],td.technicals,160,true,null);
+    } else {
+      drawChart(canvas,bars,td.technicals,160,true,null);
+    }
+  } catch(e){
+    ctx.clearRect(0,0,W,160);
+    ctx.fillStyle='#ff3355';ctx.font='10px Inter';
+    ctx.fillText('Chart error',W/2-30,80);
+  }
+}
+
 function boot(){
   refreshScan();
   refreshTrades();
@@ -1466,7 +1591,7 @@ function boot(){
   // Add initial AI greeting to each chat
   addMsg('trade-chat','a','I\'m watching whale signals from SEC Form 4, Congress trades, and options flow. High-conviction signals (score ≥80 + BUY) auto-enter. Ask me anything.');
   addMsg('opt-chat','a','I track up to 5 option candidates with a 5x leverage model. Ask me about strategy, timing, or any specific ticker.');
-  addMsg('res-chat','a','Enter a ticker above for full AI analysis: RSI, VWAP, EMA, MACD, Bollinger Bands, market structure, price prediction, and a clear BUY / WAIT / AVOID verdict.');
+  addMsg('res-chat','a','Type a ticker above and tap Analyze. I will give you RSI, VWAP, EMA, MACD, Bollinger Bands, price predictions, and a clear BUY / WAIT / AVOID verdict — all scoped to that specific stock.');
   addMsg('prog-chat','a','I summarize your performance across all 3 trading modes. Ask me what\'s working, what to improve, or for tomorrow\'s watchlist.');
 }
 boot();

@@ -214,19 +214,33 @@ _NOT_TICKERS = {
     # Common English words that look like tickers
     'AI','THE','AND','FOR','BUT','NOT','ALL','ARE','CAN','HAS','HAD','ITS','NEW',
     'NOW','OLD','ONE','OUR','OUT','OWN','SAY','SHE','WHO','WHY','WIN','YET',
+    'DAY','GET','GOT','HER','HIM','HOW','LET','LOW','MAY','MET','OFF','PUT',
+    'RUN','SET','TOP','TRY','TWO','USE','WAY','WAS','HIT','BIG','BAD','FIT',
     # Country / region codes
-    'UAE','USA','UK','EU','US','UK','UN','NATO','OPEC','IMF','WHO',
-    # Financial jargon
-    'IPO','ETF','CEO','CFO','CTO','COO','SEC','FDA','IRS','FED','GDP','CPI',
-    'NFP','EPS','P&L','LLC','INC','CORP','LTD','PLC',
-    # Other non-ticker caps
-    'BUY','SELL','HOLD','CALL','PUT','ESG','SPX','VIX','DXY','WTI',
-    'FOMC','OPEC','REPO','BOND','DEBT','CASH','GOLD','OIL','GAS',
-    'TECH','BANK','FUND','REIT','ETF','ADR',
-    # Ambiguous 2-letters that aren't tickers in our universe
+    'UAE','USA','UK','EU','US','UN','NATO','OPEC','IMF','IRS','ISO',
+    # Financial jargon abbreviations
+    'IPO','ETF','CEO','CFO','CTO','COO','SEC','FDA','FED','GDP','CPI',
+    'NFP','EPS','LLC','INC','CORP','LTD','PLC','ESG','SPX','DXY','WTI',
+    'FOMC','REPO','BOND','DEBT','CASH','REIT','ADR','OTC','ATS',
+    # News words that appear in headlines as caps
+    'TECH','BANK','FUND','GOLD','RATE','WEEK','YEAR','RISE','FALL','GAIN',
+    'LOSS','DEAL','SALE','PLAN','DATA','NEWS','MOVE','NEXT','LAST','HIGH','LOW',
+    'OPEN','SHUT','FAST','SLOW','LONG','NEAR','WIDE','FREE','LIVE','REAL',
+    # 2-letter non-tickers
     'AT','BE','BY','DO','GO','IF','IN','IS','IT','ME','MY','NO','OF',
     'ON','OR','SO','TO','UP','WE',
+    # Specific known garbage that appeared in our logs
+    'NEXR','ILLR','DRAM_TECH',  # NEXR was a hallucination, ILLR unknown
+    # Drug/pharma trial abbreviations
+    'FDA','EMA','NDA','BLA',
 }
+
+# Price validation — if a ticker's price seems unreasonable, skip it
+def _price_sanity_check(sym, price):
+    """Return False if price looks like a hallucination or delisted stock"""
+    if price is None or price <= 0: return False
+    if price > 100000: return False  # unreasonably high
+    return True
 
 def _valid_sym(sym):
     """Return True only if sym looks like a real, tradeable stock ticker"""
@@ -993,34 +1007,63 @@ def whale_auto_enter():
 
 # ── AI ANALYSIS ───────────────────────────────────────────────────────
 def ai_analyze(sym, tech, whale=None, mode=None):
-    """Full AI analysis with prediction and recommendation"""
-    price=tech['price'] if tech else 0
-    whale_info=''
+    """Full AI analysis — grounded in real numbers, no hallucination"""
+    if not tech:
+        return f"No technical data available for {sym}.", 'none'
+
+    price = tech.get('price', 0)
+    if price <= 0:
+        return f"No price data for {sym}. It may be after hours or an unsupported ticker.", 'none'
+
+    whale_info = ''
     if whale:
-        for item in whale.get('items',[])[:3]:
-            whale_info+=f"- {item.get('source')}: {item.get('title','')[:60]}\n"
-    sys_p=("You are AutoTrade Pro — expert trading AI for Abiy Kassa. "
-           "Give SPECIFIC price levels and CLEAR direction. 3-5 sentences max per section. "
-           "Always state exact BUY/WAIT/SELL and price targets.")
-    user_p=(f"Analyze {sym} for trading:\n"
-            f"Price: ${price:.2f} | Signal: {tech['signal'] if tech else '?'} | RSI: {tech['rsi'] if tech else '?'}\n"
-            f"VWAP: ${tech['vwap'] if tech else '?'} ({'above' if tech and tech['above_vwap'] else 'below'})\n"
-            f"EMA9: ${tech['ema9'] if tech else '?'} | EMA20: ${tech['ema20'] if tech else '?'} | EMA50: ${tech['ema50'] if tech else '?'}\n"
-            f"MACD: {'bullish' if tech and tech['macd_bull'] else 'bearish'} | ATR: {tech['atr'] if tech else '?'}\n"
-            f"Support: ${tech['support'] if tech else '?'} | Resistance: ${tech['resistance'] if tech else '?'}\n"
-            f"Trend (linear regression): {tech['trend'] if tech else '?'} | Daily vol: {tech['daily_vol'] if tech else '?'}%\n"
-            f"5-day price prediction: ${tech['pred_5d'] if tech else '?'} | 30-day: ${tech['pred_30d'] if tech else '?'} | 90-day: ${tech['pred_90d'] if tech else '?'}\n"
-            f"Whale activity:\n{whale_info if whale_info else 'No whale data'}\n"
-            f"Best mode per volatility: {tech['best_mode'] if tech else '?'}\n\n"
-            "Respond with:\n"
-            "1. SIGNAL: BUY/WAIT/SELL — one sentence why\n"
-            "2. Day Trade: entry zone, target, stop\n"
-            "3. Swing Trade (2-3wk): entry zone, target, stop\n"
-            "4. Long Term (3mo+): thesis and price target\n"
-            "5. PREDICTION: realistic 30-day price range\n"
-            "6. RISK: main risk in one sentence")
-    resp,src=ai_call(sys_p,user_p,max_tokens=600)
-    return resp or "AI unavailable — check GROQ_API_KEY",src or 'none'
+        for item in (whale.get('items') or [])[:2]:
+            whale_info += f"- {item.get('source','')}: {item.get('title','')[:70]}\n"
+
+    # Known ETF / ticker descriptions to prevent hallucination
+    ticker_notes = {
+        'DRAM': 'DRAM is the Roundhill Memory & Storage Technology ETF — it tracks memory chip companies (Micron, SK Hynix, Samsung). It is NOT the DRAM memory technology itself.',
+        'SOXL': 'SOXL is the 3x leveraged semiconductor ETF. It amplifies semiconductor index moves by 3x.',
+        'TQQQ': 'TQQQ is the 3x leveraged Nasdaq-100 ETF.',
+        'UPRO': 'UPRO is the 3x leveraged S&P 500 ETF.',
+        'MSTR': 'MSTR is MicroStrategy — a Bitcoin proxy stock.',
+        'FNGU': 'FNGU is the 3x leveraged FAANG+ ETF.',
+    }
+    ticker_context = ticker_notes.get(sym, '')
+
+    sys_p = (
+        f"You are AutoTrade Pro, a professional trading AI for Abiy Kassa. "
+        f"You are analyzing the ticker {sym}. "
+        f"{ticker_context} "
+        f"CRITICAL RULES: "
+        f"1. ONLY use the exact prices provided — NEVER invent or guess prices. "
+        f"2. The current price of {sym} is EXACTLY ${price:.2f}. Do not use any other price. "
+        f"3. Do not mention other stocks unless they are directly relevant to {sym}. "
+        f"4. Do not suggest entering trades unless explicitly asked. "
+        f"5. Be concise — max 5 sentences per section."
+    )
+
+    user_p = (
+        f"Analyze {sym} (current price: ${price:.2f}):\n"
+        f"Signal: {tech.get('signal','WAIT')} | RSI: {tech.get('rsi',50):.0f} | "
+        f"VWAP: ${tech.get('vwap',price):.2f} ({'ABOVE' if tech.get('above_vwap') else 'BELOW'})\n"
+        f"EMA9: ${tech.get('ema9',price):.2f} | EMA20: ${tech.get('ema20',price):.2f} | EMA50: ${tech.get('ema50',price):.2f}\n"
+        f"MACD: {'BULLISH ▲' if tech.get('macd_bull') else 'BEARISH ▼'} | ATR: {tech.get('atr',0):.3f}\n"
+        f"Support: ${tech.get('support',price*.94):.2f} | Resistance: ${tech.get('resistance',price*1.06):.2f}\n"
+        f"Trend: {tech.get('trend','unknown')} | Daily volatility: {tech.get('daily_vol',2):.1f}%/day\n"
+        f"Regression price targets — 5D: ${tech.get('pred_5d',price):.2f} | 30D: ${tech.get('pred_30d',price):.2f} | 90D: ${tech.get('pred_90d',price):.2f}\n"
+        f"{'Whale signals: ' + whale_info if whale_info else 'No whale signals for this ticker.'}\n\n"
+        f"Provide analysis in this exact format:\n"
+        f"SIGNAL: [BUY/WAIT/AVOID] — [one sentence reason using real prices above]\n"
+        f"DAY TRADE: Entry ${price:.2f}±X | Target $X | Stop $X\n"
+        f"SWING (2-3wk): Entry zone $X-$X | Target $X (+X%) | Stop $X (-X%)\n"
+        f"LONG TERM: [one sentence thesis] | 90-day target: $X\n"
+        f"RISK: [main risk in one sentence]\n"
+        f"NOTE: [one sentence about {sym} specifically — what drives it, any upcoming catalyst]"
+    )
+
+    resp, src = ai_call(sys_p, user_p, max_tokens=500)
+    return resp or f"Analysis unavailable for {sym}. Check GROQ_API_KEY.", src or 'none'
 
 # ── DAILY REPORT ──────────────────────────────────────────────────────
 def generate_daily_report():
@@ -1210,48 +1253,90 @@ def analyze():
     d=request.get_json() or {}
     sym=d.get('symbol','').upper()
     if not sym: return _cors({'ok':False})
+
+    # Clear any stale result immediately so the poll gets fresh data
+    state.setdefault('analysis_cache',{}).pop(sym, None)
+
     def do():
         try:
-            # compute_technicals now always falls back to daily data — should never hang
-            tech = compute_technicals(sym)
+            tech = None
+            # Try full technicals first (may fall back to daily data)
+            try:
+                tech = compute_technicals(sym)
+            except Exception as te:
+                print(f"  compute_technicals {sym}: {te}")
+
+            # If still None, build from price cache or yfinance fast_info
             if tech is None:
-                # Last resort: just get current price and build minimal tech
+                price = None
                 cached = cp(sym)
-                if cached:
-                    p = cached['price']
+                if cached: price = cached['price']
+                if price is None:
+                    try:
+                        tk = yf.Ticker(sym)
+                        fi = tk.fast_info
+                        price = float(getattr(fi,'last_price',None) or
+                                     getattr(fi,'previous_close',None) or 0)
+                    except: pass
+                if price and price > 0:
+                    p = price
                     tech = {
-                        'signal':'WAIT','signal_reason':'Limited data — market closed or new ticker',
-                        'price':p,'change_pct':cached.get('pct',0),
+                        'signal':'WAIT',
+                        'signal_reason':f'Limited intraday data for {sym} — using last close ${p:.2f}. Full analysis requires market hours data.',
+                        'price':p,'change_pct':cached.get('pct',0) if cached else 0,
                         'rsi':50,'vwap':p,'above_vwap':True,'macd_bull':False,
-                        'ema9':p,'ema20':p,'ema50':p,'bb_upper':p*1.05,'bb_lower':p*.95,'bb_mid':p,
-                        'atr':p*.015,'support':round(p*.94,2),'resistance':round(p*1.06,2),
+                        'ema9':round(p,2),'ema20':round(p,2),'ema50':round(p,2),
+                        'ema200':round(p,2),
+                        'bb_upper':round(p*1.05,2),'bb_lower':round(p*.95,2),'bb_mid':round(p,2),
+                        'atr':round(p*.015,3),
+                        'support':round(p*.93,2),'resistance':round(p*1.07,2),
+                        'near_support':False,'near_resistance':False,
                         'stop_day':round(p*.94,2),'target_day':round(p*1.08,2),
                         'stop_swing':round(p*.92,2),'target_swing':round(p*1.18,2),
                         'stop_lt':round(p*.88,2),'target_lt':round(p*1.40,2),
                         'pred_5d':round(p*1.02,2),'pred_30d':round(p*1.06,2),'pred_90d':round(p*1.15,2),
                         'trend':'unknown','best_mode':'swing','daily_vol':2.0,
-                        'near_support':False,'near_resistance':False,'bull_pts':0,'bull_ema':False,
-                        'rsi_oversold':False,'rsi_overbought':False,'slope':0,
+                        'bull_ema':False,'bull_pts':0,'slope':0,
+                        'rsi_oversold':False,'rsi_overbought':False,
+                        'macd':0,'macd_signal':0,'macd_hist':0,
                         'vwap_series':[],'ema9_series':[],'ema20_series':[],'ema50_series':[],
                         'bb_upper_series':[],'bb_lower_series':[],'close_series':[],'pred_series':[]
                     }
-            whale  = next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym), None)
-            rec    = whale_score_and_recommend(sym, tech, whale) if tech else {}
-            # Store partial result NOW so frontend stops spinning while AI runs
+                else:
+                    # Absolute last resort — write error result so spinner stops
+                    state.setdefault('analysis_cache',{})[sym] = {
+                        'tech':None,'whale':None,'rec':{},'symbol':sym,
+                        'analysis':f'{sym} — no price data available. This ticker may be invalid, delisted, or not supported.',
+                        'ai_src':'error','ts':now_str()
+                    }
+                    return
+
+            # Get whale context
+            whale = next((w for w in _whale_cache.get('combined',[]) if w['symbol']==sym), None)
+            rec   = whale_score_and_recommend(sym, tech, whale) if tech else {}
+
+            # ★ Write partial result immediately — stops the spinner within ~2s ★
             state.setdefault('analysis_cache',{})[sym] = {
                 'tech':tech,'whale':whale,'rec':rec,
                 'analysis':None,'ai_src':'pending','ts':now_str(),'symbol':sym
             }
-            # Now run AI (slower — runs after partial result saved)
+
+            # Run AI analysis (takes 3-8s) — updates the stored result when done
             analysis, ai_src = ai_analyze(sym, tech, whale)
-            state['analysis_cache'][sym].update({'analysis':analysis,'ai_src':ai_src})
+            state['analysis_cache'][sym].update({
+                'analysis': analysis or f'{sym} analysis complete. RSI: {tech.get("rsi",50):.0f}, Signal: {tech.get("signal","WAIT")}',
+                'ai_src': ai_src or 'groq'
+            })
+
         except Exception as e:
             print(f"Analyze {sym}: {e}")
-            # Store error state so frontend shows something instead of spinning
+            import traceback; traceback.print_exc()
             state.setdefault('analysis_cache',{})[sym] = {
                 'tech':None,'whale':None,'rec':{},'symbol':sym,
-                'analysis':f'Analysis error: {str(e)[:100]}','ai_src':'error','ts':now_str()
+                'analysis':f'Analysis error for {sym}: {str(e)[:120]}',
+                'ai_src':'error','ts':now_str()
             }
+
     threading.Thread(target=do, daemon=True).start()
     return _cors({'ok':True,'msg':f'Analyzing {sym}...'})
 
@@ -1296,24 +1381,79 @@ def close_route():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    d=request.get_json() or {}
-    msg=d.get('message','').strip(); sym=d.get('symbol','')
+    d   = request.get_json() or {}
+    msg = d.get('message','').strip()
+    sym = (d.get('symbol','') or '').upper()
     if not msg: return _cors({'ok':False})
-    trades_summary='; '.join(f"{t['symbol']}[{t['mode']}] ${t.get('pnl',0):+.1f}" for t in state['trades'].values())
-    pnl_summary=f"Day ${state['pnl']['day']:+.0f} | Swing ${state['pnl']['swing']:+.0f} | LT ${state['pnl']['longterm']:+.0f}"
-    whale_top=', '.join(w['symbol'] for w in _whale_cache.get('combined',[])[:5])
-    ctx=(f"Context: {today_str()} | {pnl_summary}\n"
-         f"Open trades: {trades_summary or 'none'}\n"
-         f"Top whale signals: {whale_top or 'none'}\n"
-         f"Market open: {is_market_open()}")
-    if sym and sym in state.get('analysis_cache',{}):
-        r=state['analysis_cache'][sym]
-        tech=r.get('tech',{})
-        ctx+=f"\n{sym} signal: {tech.get('signal','?')} RSI:{tech.get('rsi','?')} VWAP:{'above' if tech.get('above_vwap') else 'below'}"
-    sys_p=("AutoTrade Pro AI for Abiy Kassa. Expert day/swing/long-term trader. "
-           "Be specific, direct, cite real prices. 3-5 sentences. Paper trading.\n"+ctx)
-    resp,src=ai_call(sys_p,msg,max_tokens=400)
-    return _cors({'ok':True,'response':resp or 'AI unavailable','src':src})
+
+    # Known ticker descriptions (prevents "DRAM = memory technology" confusion)
+    TICKER_NOTES = {
+        'DRAM': 'DRAM is the Roundhill Memory & Storage Technology ETF (ticker: DRAM). It tracks memory chip stocks like Micron, SK Hynix, Samsung. It is NOT the DRAM memory technology.',
+        'SOXL': 'SOXL is the Direxion 3x Semiconductor ETF.',
+        'TQQQ': 'TQQQ is the ProShares 3x Nasdaq-100 ETF.',
+        'MSTR': 'MSTR is MicroStrategy, primarily a Bitcoin proxy.',
+        'FNGU': 'FNGU is the MicroSectors 3x FAANG+ ETF.',
+        'UPRO': 'UPRO is the ProShares 3x S&P500 ETF.',
+    }
+
+    # Build scoped context — prioritize the ticker being discussed
+    ctx_lines = [
+        f"Date: {today_str()} | Market: {'OPEN' if is_market_open() else 'CLOSED'}",
+        f"P&L — Day: ${state['pnl']['day']:+.0f} | Swing: ${state['pnl']['swing']:+.0f} | LT: ${state['pnl']['longterm']:+.0f}",
+    ]
+
+    # Active trades summary
+    if state['trades']:
+        ctx_lines.append("Open trades: " + ", ".join(
+            f"{t['symbol']} [{t['mode']}] ${t.get('current',t['entry']):.2f} P&L ${(t.get('current',t['entry'])-t['entry'])*t['shares']:+.0f}"
+            for t in list(state['trades'].values())[:5]
+        ))
+    else:
+        ctx_lines.append("Open trades: none")
+
+    # If discussing a specific ticker, inject its analysis with real prices
+    if sym:
+        ticker_note = TICKER_NOTES.get(sym,'')
+        if ticker_note:
+            ctx_lines.append(f"IMPORTANT — {sym}: {ticker_note}")
+
+        cached = cp(sym)
+        if cached:
+            ctx_lines.append(f"{sym} live price: ${cached['price']:.2f} ({cached['pct']:+.2f}% today)")
+
+        analysis_data = state.get('analysis_cache',{}).get(sym)
+        if analysis_data and analysis_data.get('tech'):
+            t = analysis_data['tech']
+            ctx_lines.append(
+                f"{sym} technicals: Signal={t.get('signal','?')} | RSI={t.get('rsi',50):.0f} | "
+                f"VWAP=${t.get('vwap',0):.2f} ({'above' if t.get('above_vwap') else 'below'}) | "
+                f"EMA9=${t.get('ema9',0):.2f} | Support=${t.get('support',0):.2f} | Resistance=${t.get('resistance',0):.2f}"
+            )
+            ctx_lines.append(
+                f"{sym} price targets: 5D=${t.get('pred_5d',0):.2f} | 30D=${t.get('pred_30d',0):.2f} | 90D=${t.get('pred_90d',0):.2f}"
+            )
+        elif sym:
+            ctx_lines.append(f"{sym}: No analysis cached yet. Prices from live feed only.")
+    else:
+        # No specific ticker — give whale summary
+        whale_syms = [w['symbol'] for w in _whale_cache.get('combined',[])[:5]]
+        if whale_syms:
+            ctx_lines.append(f"Top whale signals today: {', '.join(whale_syms)}")
+
+    sys_p = (
+        "You are AutoTrade Pro AI — a professional trading discussion partner for Abiy Kassa. "
+        "RULES:\n"
+        "1. ONLY use exact prices from the context below — NEVER invent prices.\n"
+        "2. If a price is not in context, say 'I don't have the current price for X'.\n"
+        "3. DISCUSS, don't automatically suggest trades. Abiy will decide what to trade.\n"
+        "4. Keep answers to 3-4 sentences maximum.\n"
+        "5. If the user asks about a ticker, stay focused on THAT ticker only.\n"
+        "6. Never recommend entering a trade unless explicitly asked.\n\n"
+        "Current data:\n" + "\n".join(ctx_lines)
+    )
+
+    resp, src = ai_call(sys_p, msg, max_tokens=300)
+    return _cors({'ok':True,'response':resp or 'AI unavailable — check GROQ_API_KEY','src':src})
 
 @app.route('/daily-report')
 def daily_report():
