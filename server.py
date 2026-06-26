@@ -127,7 +127,7 @@ def _auth():
         '/','/ping','/unlock','/favicon.ico',
         '/analysis-result','/candles','/technicals',
         '/prices','/news','/data-status','/performance',
-        '/whale-data','/trades',
+        '/whale-data','/trades','/options-status',
     }
     if not ABIY_PIN or request.path in pub: return
     # Also allow paths that START with /analysis-result (query strings)
@@ -279,8 +279,8 @@ def _valid_sym(sym):
 def _valid_whale_pick(sym, price):
     """Extra filter for whale picks — exclude penny stocks and garbage"""
     if not _valid_sym(sym): return False
-    if price is not None and price < 0.5: return False   # penny stocks < $0.50
-    if price is not None and price > 50000: return False # unreasonably high
+    if price is not None and price < 1.0: return False   # nothing under $1
+    if price is not None and price > 50000: return False
     return True
 
 # ════════════════════════════════════════════════════════════════════
@@ -391,8 +391,8 @@ def alpaca_get_news_tickers():
 
 def yfinance_momentum_scan():
     """
-    Score the full watchlist using yfinance — price change + volume ratio.
-    This ALWAYS works on Render. It's the backbone of the whale engine.
+    Score the full watchlist — always includes any stock with a BUY signal
+    from compute_technicals, regardless of % change today.
     """
     items = []
     try:
@@ -416,19 +416,22 @@ def yfinance_momentum_scan():
                 chg   = (price - prev) / prev * 100
                 avg_vol = float(vl.iloc[:-1].mean()) if len(vl)>1 else float(vl.iloc[-1])
                 vol_ratio = float(vl.iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
-                # Score: momentum * volume
-                score = abs(chg) * min(vol_ratio, 5)
-                if chg <= 0 and vol_ratio < 2: continue  # skip weak bearish
-                # Confidence based on strength
-                if chg > 5 and vol_ratio > 3:     conf, hold = 78, 14
-                elif chg > 3 and vol_ratio > 2:   conf, hold = 70, 7
+
+                # Check cached tech signal — if BUY, always include
+                cached_tech = state.get('analysis_cache',{}).get(sym,{}).get('tech')
+                has_buy = cached_tech and cached_tech.get('signal') == 'BUY'
+
+                if chg > 5 and vol_ratio > 2:     conf, hold = 78, 14
+                elif chg > 3 and vol_ratio > 1.5: conf, hold = 70, 7
                 elif chg > 1 and vol_ratio > 1.5: conf, hold = 62, 3
-                elif vol_ratio > 3:               conf, hold = 65, 3  # volume spike even if flat
+                elif vol_ratio > 3:               conf, hold = 65, 3
+                elif has_buy:                     conf, hold = 60, 3  # BUY signal even if quiet day
                 else: continue
+
                 source = 'High Momentum' if chg > 3 else ('Volume Surge' if vol_ratio > 3 else 'Momentum')
                 items.append({
                     'symbol':sym,'source':source,'direction':'buy',
-                    'title':f'{sym} {chg:+.1f}% with {vol_ratio:.1f}x volume — momentum signal',
+                    'title':f'{sym} {chg:+.1f}% vol {vol_ratio:.1f}x — {source.lower()}',
                     'date':today_str(),'type':'momentum',
                     'confidence':conf,'hold_days':hold,
                     'price':round(price,2),'chg_pct':round(chg,2),'vol_ratio':round(vol_ratio,1)
@@ -1013,49 +1016,55 @@ def monitor_trades():
             close_trade(tid,'stop'); continue
 
 def whale_auto_enter():
-    """Auto-enter ONLY high-conviction whale signals — real sources only, no news garbage"""
+    """
+    Auto-enter high-conviction signals during market hours.
+    Two paths:
+    1. Whale picks with display_score >= 75 + BUY signal
+    2. Direct watchlist scan — always check WATCHLIST for BUY signals
+    """
     if not is_market_open(): return
+
+    entered_syms = set(t['symbol'] for t in state['trades'].values())
+
+    # ── PATH 1: Whale picks ───────────────────────────────────────────
     whale_data = get_whale_data()
     combined   = whale_data.get('combined', [])
-
-    for w in combined[:15]:
+    for w in combined[:20]:
         sym = w['symbol']
-        # Skip if already in any active trade
-        if any(t['symbol'] == sym for t in state['trades'].values()): continue
-
-        score      = w.get('confidence', 0)
-        sources    = set(w.get('sources', []))
-        src_types  = set(it.get('type','') for it in w.get('items', []))
-
-        # ── STRICT ENTRY GATE ─────────────────────────────────────────
-        # Must have at least one REAL whale source — not just news/RSS headlines
-        real_sources = sources - {'Options News','News Flow','Momentum Scanner'}
-        has_real = bool(real_sources)  # Congress, SEC Form 4, Unusual Whales, Volume Surge, Barchart
-
-        # Require score >= 80 AND a real source
-        # OR score >= 85 for momentum/volume surge (higher bar without named insider)
-        if not has_real and score < 85: continue
-        if has_real and score < 80:     continue
-
-        # Must have a BUY technical signal
+        if sym in entered_syms: continue
+        score = w.get('display_score') or w.get('confidence', 0)
+        if score < 72: continue  # minimum bar
         tech = compute_technicals(sym)
-        if not tech or tech['signal'] != 'BUY': continue
-
-        # RSI must not be overbought
-        if tech.get('rsi', 50) > 72: continue
-
-        # Determine mode from whale data
+        if not tech or tech.get('signal') != 'BUY': continue
+        if tech.get('rsi', 50) > 75: continue  # not overbought
         rec  = whale_score_and_recommend(sym, tech, w)
         mode = rec['rec_mode']
-
         ok, msg = enter_trade(sym, mode, manual=False, whale_data=w)
         if ok:
-            src_str = ', '.join(sorted(real_sources or sources))
-            add_log(
-                f"🐋 WHALE AUTO ENTRY {sym} [{mode.upper()}] "
-                f"Score:{score}/99 Sources:{src_str}",
-                alert=True
-            )
+            entered_syms.add(sym)
+            add_log(f"🐋 WHALE AUTO ENTRY {sym} [{mode.upper()}] Score:{score}/99 Signal:BUY RSI:{tech.get('rsi',0):.0f}", alert=True)
+
+    # ── PATH 2: Direct watchlist scan — catches BUY signals not in whale picks ──
+    priority = ['NVDA','MU','DRAM','AMD','TSLA','AAPL','MSFT','SOXL','TQQQ',
+                'PLTR','MSTR','COIN','AVGO','SMCI','SOFI','RKLB','HIMS','APP']
+    for sym in priority:
+        if sym in entered_syms: continue
+        if len(state['trades']) >= 5: break  # max 5 concurrent trades
+        try:
+            tech = compute_technicals(sym)
+            if not tech or tech.get('signal') != 'BUY': continue
+            rsi = tech.get('rsi', 50)
+            if rsi > 75 or rsi < 20: continue
+            bull_pts = tech.get('bull_pts', 0)
+            if bull_pts < 3: continue  # need at least 3 bullish factors
+            rec  = whale_score_and_recommend(sym, tech, None)
+            mode = rec['rec_mode']
+            ok, msg = enter_trade(sym, mode, manual=False, whale_data=None)
+            if ok:
+                entered_syms.add(sym)
+                add_log(f"📈 WATCHLIST AUTO ENTRY {sym} [{mode.upper()}] BUY RSI:{rsi:.0f} Bulls:{bull_pts}/4 VWAP:{'✅' if tech.get('above_vwap') else '❌'}", alert=True)
+        except Exception as e:
+            print(f"  watchlist scan {sym}: {e}")
 
 # ── AI ANALYSIS ───────────────────────────────────────────────────────
 def ai_analyze(sym, tech, whale=None, mode=None):
@@ -1593,6 +1602,97 @@ def performance():
                   'best':max(t.get('pnl',0) for t in c),
                   'worst':min(t.get('pnl',0) for t in c),
                   'by_mode':{m:round(state['pnl'][m],2) for m in ('day','swing','longterm')}})
+
+@app.route('/options-status')
+def options_status():
+    """
+    Real options candidates — scans priority watchlist for BUY signals
+    and builds option play recommendations with simulated P&L tracking.
+    """
+    candidates = []
+    prices = all_prices()
+
+    # Priority symbols to scan for options plays
+    priority = ['NVDA','MU','DRAM','AMD','TSLA','AAPL','MSFT','SOXL','TQQQ',
+                'PLTR','MSTR','COIN','AVGO','SMCI','SOFI','RKLB','APP','META']
+
+    for sym in priority:
+        if len(candidates) >= 5: break
+        try:
+            # Use cached tech first, compute if missing
+            cached = state.get('analysis_cache',{}).get(sym,{})
+            tech = cached.get('tech')
+            if not tech:
+                tech = compute_technicals(sym)
+                if not tech: continue
+
+            sig = tech.get('signal','WAIT')
+            rsi = tech.get('rsi', 50)
+            price = tech.get('price', 0)
+            if not price or price <= 0: continue
+
+            # Options only on BUY or near-oversold bounces
+            if sig == 'BUY':
+                strategy = 'CALL'
+                conf = min(99, 60 + tech.get('bull_pts',0)*8)
+            elif sig == 'WAIT' and rsi < 38:
+                strategy = 'CALL'  # oversold bounce play
+                conf = 55
+            else:
+                continue
+
+            # Skip if RSI overbought
+            if rsi > 74: continue
+
+            # Get current price from live feed
+            q = prices.get(sym)
+            cur_price = q['price'] if q else price
+            entry_price = price  # price when analysis was run
+
+            # Simulate option P&L (5x leverage model)
+            underlying_chg = ((cur_price - entry_price) / entry_price * 100) if entry_price else 0
+            sim_pnl_pct = round(underlying_chg * 5, 1)  # 5x leverage approximation
+            peak_pnl = max(sim_pnl_pct, 0)
+
+            # Score for display
+            rec = whale_score_and_recommend(sym, tech, None)
+            score = rec['score']
+
+            # Build recommendation
+            atm_strike = round(cur_price / 5) * 5  # round to nearest $5
+            expiry_days = 14 if tech.get('daily_vol',2) < 3 else 7
+            reason = (f"{'BUY signal' if sig=='BUY' else 'Oversold bounce'} — "
+                     f"RSI {rsi:.0f}, {'above' if tech.get('above_vwap') else 'below'} VWAP ${tech.get('vwap',0):.2f}, "
+                     f"MACD {'▲ bull' if tech.get('macd_bull') else '▼ bear'}")
+
+            candidates.append({
+                'symbol': sym,
+                'strategy': strategy,
+                'score': score,
+                'signal': sig,
+                'entry_underlying': round(entry_price, 2),
+                'current_underlying': round(cur_price, 2),
+                'atm_strike': atm_strike,
+                'expiry_days': expiry_days,
+                'sim_pnl_pct': sim_pnl_pct,
+                'peak_pnl_pct': peak_pnl,
+                'rsi': round(rsi, 1),
+                'reason': reason,
+                'entry_time': cached.get('ts', now_str())[:16]
+            })
+        except Exception as e:
+            print(f"  options scan {sym}: {e}")
+
+    # Sort by score
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+
+    # History from completed trades
+    history = [
+        {**t, 'strategy':'CALL', 'sim_pnl_pct':round(t.get('pct',0)*5,1)}
+        for t in state.get('completed',[])[-10:]
+    ]
+
+    return _cors({'candidates': candidates[:5], 'history': history})
 
 # ── BOOT ──────────────────────────────────────────────────────────────
 load_state()

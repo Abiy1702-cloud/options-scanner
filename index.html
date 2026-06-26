@@ -1441,14 +1441,14 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   const dpr=window.devicePixelRatio||1;
   const W=canvas.clientWidth||canvas.offsetWidth||360;
   // Volume panel is 18% of chart height, drawn below main chart
-  const volH   = Math.max(30, Math.floor(h * 0.18));
+  const volH   = Math.max(40, Math.floor(h * 0.22));
   const totalH = h + volH;
   canvas.width=W*dpr; canvas.height=totalH*dpr;
   canvas.style.width=W+'px'; canvas.style.height=totalH+'px';
   const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,totalH);
 
-  const PL=4, PR=80, PT=12, PB=8, PW=W-PL-PR, PH=h-PT-PB;
+  const PL=4, PR=95, PT=14, PB=8, PW=W-PL-PR, PH=h-PT-PB;
 
   // ── Y range: price only (keep indicators in view) ────────
   const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
@@ -1577,7 +1577,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   };
   if(tech){
     line(tech.vwap_series, '#ffb020',2.0,[],'VWAP','#ffb020',true);
-    line(tech.ema9_series, '#00d4ff',1.4,[],'EMA9','#00d4ff');
+    line(tech.ema9_series, '#00d4ff',1.4,[],'','#00d4ff');  // EMA9 line but no right label — reduces clutter
     line(tech.ema20_series,'#7a9ab5',1.0,[],'EMA20','#7a9ab5');
     line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'EMA50','#b366ff');
   }
@@ -1588,7 +1588,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   // ── Draw all right labels — staggered to avoid overlap ─
   // Sort by Y position, then push apart any that are within 11px
   _rightLabels.sort((a,b)=>a.y-b.y);
-  const MIN_GAP = 11;
+  const MIN_GAP = 13;
   // Forward pass — push down
   for(let i=1;i<_rightLabels.length;i++){
     if(_rightLabels[i].y - _rightLabels[i-1].y < MIN_GAP)
@@ -1652,7 +1652,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
         ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(endX,endY-8);ctx.lineTo(endX,endY+8);ctx.closePath();ctx.fill();
 
         // Prediction line — thick, bright green/red
-        ctx.strokeStyle=going_up?'#00ff88':'#ff3355';ctx.lineWidth=2;ctx.setLineDash([7,4]);
+        ctx.strokeStyle=going_up?'#00ff88':'#ff3355';ctx.lineWidth=3;ctx.setLineDash([8,3]);
         ctx.beginPath();ctx.moveTo(lastX,lastY);
         fut.forEach((v,i)=>{
           if(!v||!isFinite(v))return;
@@ -1665,7 +1665,7 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
         // Big prediction label box
         const arrow=going_up?'▲':'▼';
         const pLabel=arrow+' PRED $'+endV.toFixed(2);
-        ctx.font='bold 10px Inter';
+        ctx.font='bold 11px Inter';
         const tw=ctx.measureText(pLabel).width;
         const lx=Math.min(endX-2, W-PR-tw-4);
         const ly2=endY+(going_up?-16:8);
