@@ -1437,297 +1437,236 @@ async function genReport() {
 // CHART ENGINE — Full technical chart with prediction
 // ══════════════════════════════════════════════════════════
 function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
-  if(!canvas||!bars.length) return;
-  const dpr=window.devicePixelRatio||1;
-  const W=canvas.clientWidth||canvas.offsetWidth||360;
-  // Volume panel is 18% of chart height, drawn below main chart
-  const volH   = Math.max(40, Math.floor(h * 0.22));
+  if(!canvas || !bars || bars.length < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.clientWidth || canvas.parentElement?.clientWidth || 760;
+  const volH = Math.floor(h * 0.18);
   const totalH = h + volH;
-  canvas.width=W*dpr; canvas.height=totalH*dpr;
-  canvas.style.width=W+'px'; canvas.style.height=totalH+'px';
-  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr);
-  ctx.clearRect(0,0,W,totalH);
+  canvas.width  = W * dpr; canvas.height = totalH * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = totalH + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
 
-  const PL=4, PR=95, PT=14, PB=8, PW=W-PL-PR, PH=h-PT-PB;
+  // ── Background ────────────────────────────────────────────────────
+  ctx.fillStyle = '#0a0f1a';
+  ctx.fillRect(0, 0, W, totalH);
 
-  // ── Y range: price only (keep indicators in view) ────────
-  const priceVals = bars.flatMap(b=>[b.h,b.l]).filter(v=>v>0&&isFinite(v));
-  let HI=Math.max(...priceVals), LO=Math.min(...priceVals);
-  // Expand range to include indicator series only slightly
-  if(tech){
-    const indVals=[];
-    ['vwap_series','ema9_series','ema20_series','ema50_series','bb_upper_series','bb_lower_series'].forEach(k=>{
-      if(tech[k]) tech[k].filter(v=>v&&isFinite(v)&&v>LO*.85&&v<HI*1.15).forEach(v=>indVals.push(v));
-    });
-    if(indVals.length){HI=Math.max(HI,...indVals);LO=Math.min(LO,...indVals);}
-    if(showPred&&tech.pred_series){
-      const pv=tech.pred_series.filter(v=>v&&isFinite(v)&&v>LO*.85&&v<HI*1.15);
-      if(pv.length){HI=Math.max(HI,...pv);LO=Math.min(LO,...pv);}
+  // ── Layout constants ──────────────────────────────────────────────
+  const PL = 8, PR = 72, PT = 16, PB = 8;
+  const PW = W - PL - PR, PH = h - PT - PB;
+
+  // ── Y-axis range — price only, tight ─────────────────────────────
+  const prices = bars.flatMap(b => [b.h, b.l]).filter(v => v > 0 && isFinite(v));
+  let HI = Math.max(...prices), LO = Math.min(...prices);
+  // Include support/resistance/prediction in range
+  if (tech) {
+    const extras = [tech.support, tech.resistance, tech.pred_30d].filter(v=>v&&isFinite(v));
+    if(extras.length) { HI = Math.max(HI,...extras); LO = Math.min(LO,...extras); }
+  }
+  const PAD = (HI-LO) * 0.08;
+  HI += PAD; LO -= PAD;
+  const RNG = HI - LO || 1;
+  const fy  = v => PT + PH - ((v - LO) / RNG * PH);
+  const cw  = PW / bars.length;
+
+  // ── Volume panel ──────────────────────────────────────────────────
+  const volTop  = h + 3;
+  const volPH   = volH - 8;
+  const maxVol  = Math.max(...bars.map(b => b.v || 0), 1);
+  const fvol    = v => volTop + volPH - (v / maxVol * volPH);
+
+  // Divider line between chart and volume
+  ctx.strokeStyle = 'rgba(255,255,255,.06)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PL, volTop); ctx.lineTo(W-PR, volTop); ctx.stroke();
+  ctx.fillStyle = 'rgba(100,140,180,.5)'; ctx.font = 'bold 7px Inter';
+  ctx.fillText('VOL', W-PR+4, volTop+10);
+
+  // ── Y-axis grid (subtle) ──────────────────────────────────────────
+  ctx.strokeStyle = 'rgba(255,255,255,.04)';
+  ctx.lineWidth = 0.5;
+  for (let i=0; i<=4; i++) {
+    const v = LO + RNG * i / 4, y = fy(v);
+    ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W-PR, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(140,170,200,.5)'; ctx.font = '8px Inter';
+    ctx.fillText('$' + v.toFixed(2), W-PR+4, y+3);
+  }
+  // X-axis time labels
+  const step = Math.max(1, Math.floor(bars.length / 5));
+  bars.forEach((b,i) => {
+    if (i % step === 0 && b.hm) {
+      ctx.fillStyle = 'rgba(100,140,180,.6)'; ctx.font = '8px Inter';
+      ctx.fillText(b.hm, PL + i*cw, h-2);
     }
-  }
-  const PAD=(HI-LO)*0.08; HI+=PAD; LO-=PAD;
-  const RNG=(HI-LO)||1;
-  const fy=v=>PT+PH-((v-LO)/RNG*PH);
-  const cw=PW/Math.max(bars.length,1);
-
-  // ── Volume panel setup ────────────────────────────────
-  const volTop = h + 2;       // 2px gap below price chart
-  const volPH  = volH - 6;    // usable volume height
-  const maxVol = Math.max(...bars.map(b=>b.v||0))||1;
-  const fvol   = v => volTop + volPH - (v/maxVol*volPH);
-
-  // ── Dark background for chart area ───────────────────
-  ctx.fillStyle='#080f17'; ctx.fillRect(0,0,W,h+volH);
-
-  // ── Grid lines ────────────────────────────────────────
-  ctx.strokeStyle='rgba(255,255,255,.04)'; ctx.lineWidth=.5;
-  for(let i=0;i<=5;i++){
-    const v=LO+RNG*i/5, y=fy(v);
-    ctx.beginPath();ctx.moveTo(PL,y);ctx.lineTo(W-PR,y);ctx.stroke();
-    ctx.fillStyle='#4a6359';ctx.font='bold 8px Inter';
-    ctx.fillText('$'+v.toFixed(2),W-PR+3,y+3);
-  }
-  // Time labels
-  const step=Math.max(1,Math.floor(bars.length/6));
-  bars.forEach((b,i)=>{
-    if(i%step===0&&b.hm){ctx.fillStyle='#3d5a72';ctx.font='8px Inter';ctx.fillText(b.hm,PL+i*cw,h-2);}
   });
 
-  // ── Volume separator line ─────────────────────────────
-  ctx.strokeStyle='rgba(255,255,255,.08)';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(PL,volTop);ctx.lineTo(W-PR,volTop);ctx.stroke();
-  ctx.fillStyle='#3d5a72';ctx.font='7px Inter';ctx.fillText('VOL',W-PR+3,volTop+10);
-
-  // ── Bollinger Bands fill ──────────────────────────────
-  if(tech&&tech.bb_upper_series&&tech.bb_lower_series&&tech.bb_upper_series.length===bars.length){
-    ctx.beginPath();
-    tech.bb_upper_series.forEach((v,i)=>{if(!v||!isFinite(v))return;const x=PL+i*cw+cw/2;i===0?ctx.moveTo(x,fy(v)):ctx.lineTo(x,fy(v));});
-    tech.bb_lower_series.slice().reverse().forEach((v,i)=>{if(!v||!isFinite(v))return;const ri=tech.bb_lower_series.length-1-i;ctx.lineTo(PL+ri*cw+cw/2,fy(v));});
-    ctx.closePath();ctx.fillStyle='rgba(179,102,255,.07)';ctx.fill();
-    ctx.strokeStyle='rgba(179,102,255,.25)';ctx.lineWidth=1;
-    const dlBB=(s)=>{ctx.beginPath();let f=true;s.forEach((v,i)=>{if(!v||!isFinite(v))return;const x=PL+i*cw+cw/2,y=fy(v);f?(ctx.moveTo(x,y),f=false):ctx.lineTo(x,y);});ctx.stroke();};
-    dlBB(tech.bb_upper_series);dlBB(tech.bb_lower_series);
-    // BB label on right
-    const bbu=tech.bb_upper_series[tech.bb_upper_series.length-1];
-    const bbl=tech.bb_lower_series[tech.bb_lower_series.length-1];
-    // BB labels removed — the purple fill band is self-explanatory
+  // ── SUPPORT zone (green) ──────────────────────────────────────────
+  if (tech && tech.support && isFinite(tech.support)) {
+    const sy = fy(tech.support);
+    // Subtle green fill below support
+    ctx.fillStyle = 'rgba(0,255,136,.05)';
+    ctx.fillRect(PL, sy, PW, Math.min(PH, (h-PB)-sy));
+    // Dashed line
+    ctx.strokeStyle = 'rgba(0,255,136,.6)'; ctx.lineWidth = 1.5; ctx.setLineDash([8,4]);
+    ctx.beginPath(); ctx.moveTo(PL, sy); ctx.lineTo(W-PR, sy); ctx.stroke();
+    ctx.setLineDash([]);
+    // On-chart label (left side)
+    ctx.fillStyle = '#00ff88'; ctx.font = 'bold 9px Inter';
+    ctx.fillText('▶ SUPPORT  $' + tech.support.toFixed(2), PL+4, sy-5);
+    // Right-side price
+    ctx.fillStyle = '#00ff88'; ctx.font = 'bold 8px Inter';
+    ctx.fillText('$' + tech.support.toFixed(2), W-PR+4, sy+4);
   }
 
-  // ── Support zone (green) ──────────────────────────────
-  if(tech&&tech.support&&isFinite(tech.support)){
-    const sy=fy(tech.support), sy2=fy(tech.support*0.993);
-    ctx.fillStyle='rgba(0,255,136,.08)';ctx.fillRect(PL,sy,PW,sy2-sy);
-    ctx.strokeStyle='rgba(0,255,136,.5)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
-    ctx.beginPath();ctx.moveTo(PL,sy);ctx.lineTo(W-PR,sy);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='rgba(0,255,136,.6)';ctx.font='bold 8px Inter';
-    ctx.fillText('SUPPORT $'+tech.support.toFixed(2),PL+4,sy-4);
+  // ── RESISTANCE zone (red) ─────────────────────────────────────────
+  if (tech && tech.resistance && isFinite(tech.resistance)) {
+    const ry = fy(tech.resistance);
+    ctx.fillStyle = 'rgba(255,51,85,.05)';
+    ctx.fillRect(PL, ry-20, PW, 20);
+    ctx.strokeStyle = 'rgba(255,51,85,.65)'; ctx.lineWidth = 1.5; ctx.setLineDash([8,4]);
+    ctx.beginPath(); ctx.moveTo(PL, ry); ctx.lineTo(W-PR, ry); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ff3355'; ctx.font = 'bold 9px Inter';
+    ctx.fillText('▶ RESISTANCE  $' + tech.resistance.toFixed(2), PL+4, ry-7);
+    ctx.fillStyle = '#ff3355'; ctx.font = 'bold 8px Inter';
+    ctx.fillText('$' + tech.resistance.toFixed(2), W-PR+4, ry+4);
   }
 
-  // ── Resistance zone (red) ─────────────────────────────
-  if(tech&&tech.resistance&&isFinite(tech.resistance)){
-    const ry=fy(tech.resistance), ry2=fy(tech.resistance*1.007);
-    ctx.fillStyle='rgba(255,51,85,.07)';ctx.fillRect(PL,ry2,PW,ry-ry2);
-    ctx.strokeStyle='rgba(255,51,85,.55)';ctx.lineWidth=1.2;ctx.setLineDash([6,4]);
-    ctx.beginPath();ctx.moveTo(PL,ry);ctx.lineTo(W-PR,ry);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='rgba(255,51,85,.7)';ctx.font='bold 8px Inter';
-    ctx.fillText('RESISTANCE $'+tech.resistance.toFixed(2),PL+4,ry-4);
-  }
-
-  // ── Volume bars ───────────────────────────────────────
-  bars.forEach((b,i)=>{
-    const x=PL+i*cw; const bw=Math.max(cw-1,1);
-    const up=b.c>=b.o;
-    ctx.fillStyle=up?'rgba(0,255,136,.35)':'rgba(255,51,85,.3)';
-    const top=fvol(b.v||0);
-    ctx.fillRect(x,top,bw,volTop+volPH-top);
+  // ── Volume bars ───────────────────────────────────────────────────
+  bars.forEach((b,i) => {
+    const bx = PL + i*cw;
+    const bw = Math.max(cw - 0.5, 1);
+    const up = b.c >= b.o;
+    ctx.fillStyle = up ? 'rgba(0,255,136,.3)' : 'rgba(255,51,85,.25)';
+    const top = fvol(b.v || 0);
+    ctx.fillRect(bx, top, bw, volTop+volPH-top);
   });
 
-  // ── Candles ───────────────────────────────────────────
-  bars.forEach((b,i)=>{
-    const x=PL+i*cw+cw/2,up=b.c>=b.o;
-    ctx.strokeStyle=up?'#00ff88':'#ff3355';ctx.fillStyle=up?'#00ff88':'#ff3355';ctx.lineWidth=.8;
-    ctx.beginPath();ctx.moveTo(x,fy(b.h));ctx.lineTo(x,fy(b.l));ctx.stroke();
-    const bw=Math.max(Math.floor(cw*.72),1);
-    ctx.fillRect(x-bw/2,Math.min(fy(b.o),fy(b.c)),bw,Math.max(Math.abs(fy(b.c)-fy(b.o)),1));
+  // ── Candles ───────────────────────────────────────────────────────
+  bars.forEach((b,i) => {
+    const cx = PL + i*cw + cw/2;
+    const up = b.c >= b.o;
+    const color = up ? '#26a69a' : '#ef5350';  // Robinhood-style teal/red
+    // Wick
+    ctx.strokeStyle = color; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, fy(b.h)); ctx.lineTo(cx, fy(b.l)); ctx.stroke();
+    // Body
+    const bw = Math.max(Math.floor(cw * 0.7), 1);
+    const bodyTop = Math.min(fy(b.o), fy(b.c));
+    const bodyH   = Math.max(Math.abs(fy(b.c) - fy(b.o)), 1);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - bw/2, bodyTop, bw, bodyH);
   });
 
-  // ── Smart right-side label system — no overlaps ───────
-  // Collect all labels, sort by Y, then space them out
-  const _rightLabels = [];  // {y, text, color, bold}
-  const addRLabel = (y, text, color, bold=false) => {
-    if(y<PT||y>h-PB) return;
-    _rightLabels.push({y, text, color, bold});
-  };
-
-  // ── Indicator lines ───────────────────────────────────
-  const line=(s,color,lw=1.2,dash=[],labelText='',labelColor='',bold=false)=>{
-    if(!s||!s.length)return;
-    ctx.strokeStyle=color;ctx.lineWidth=lw;ctx.setLineDash(dash);ctx.beginPath();
-    let first=true;
-    s.forEach((v,i)=>{
-      if(!v||!isFinite(v)||v<LO*.7||v>HI*1.3)return;
-      const x=PL+i*cw+cw/2,y=fy(v);first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);
-    });
-    ctx.stroke();ctx.setLineDash([]);
-    // Queue label — don't draw yet
-    if(labelText){
-      const last=s.filter(v=>v&&isFinite(v)&&v>LO*.7&&v<HI*1.3).pop();
-      if(last!=null) addRLabel(fy(last), labelText+' $'+last.toFixed(2), labelColor||color, bold);
-    }
-  };
-  if(tech){
-    line(tech.vwap_series, '#ffb020',2.0,[],'VWAP','#ffb020',true);
-    line(tech.ema9_series, '#00d4ff',1.4,[],'','#00d4ff');  // EMA9 line but no right label — reduces clutter
-    line(tech.ema20_series,'#7a9ab5',1.0,[],'EMA20','#7a9ab5');
-    line(tech.ema50_series,'rgba(179,102,255,.8)',1.0,[4,3],'EMA50','#b366ff');
-  }
-  // Queue support/resistance labels too
-  if(tech&&tech.support&&isFinite(tech.support))    addRLabel(fy(tech.support),'SUP $'+tech.support.toFixed(2),'#00ff88',true);
-  if(tech&&tech.resistance&&isFinite(tech.resistance)) addRLabel(fy(tech.resistance),'RES $'+tech.resistance.toFixed(2),'#ff3355',true);
-
-  // ── Draw all right labels — staggered to avoid overlap ─
-  // Sort by Y position, then push apart any that are within 11px
-  _rightLabels.sort((a,b)=>a.y-b.y);
-  const MIN_GAP = 13;
-  // Forward pass — push down
-  for(let i=1;i<_rightLabels.length;i++){
-    if(_rightLabels[i].y - _rightLabels[i-1].y < MIN_GAP)
-      _rightLabels[i].y = _rightLabels[i-1].y + MIN_GAP;
-  }
-  // Backward pass — push up if we hit bottom
-  for(let i=_rightLabels.length-2;i>=0;i--){
-    if(_rightLabels[i+1].y - _rightLabels[i].y < MIN_GAP)
-      _rightLabels[i].y = _rightLabels[i+1].y - MIN_GAP;
-  }
-  // Now draw all labels
-  _rightLabels.forEach(({y,text,color,bold})=>{
-    if(y<PT-2||y>h+2) return;
-    ctx.fillStyle=color;
-    ctx.font=(bold?'bold ':'')+'8px Inter';
-    ctx.fillText(text, W-PR+3, y+3);
-  });
-
-  // ── Trade entry / target / stop lines ─────────────────
-  if(trade&&trade.entry&&isFinite(trade.entry)){
-    const drawHL=(y,col,lbl)=>{
-      ctx.strokeStyle=col;ctx.lineWidth=1.2;ctx.setLineDash([4,4]);
-      ctx.beginPath();ctx.moveTo(PL,y);ctx.lineTo(W-PR,y);ctx.stroke();ctx.setLineDash([]);
-      ctx.fillStyle=col;ctx.font='bold 8px Inter';ctx.fillText(lbl,W-PR+3,y+3);
+  // ── Entry / Target / Stop lines (when trade provided) ─────────────
+  if (trade && trade.entry && isFinite(trade.entry)) {
+    const drawHL = (y, col, label) => {
+      ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.setLineDash([5,4]);
+      ctx.beginPath(); ctx.moveTo(PL,y); ctx.lineTo(W-PR,y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = col; ctx.font = 'bold 8px Inter';
+      ctx.fillText(label, W-PR+4, y+3);
     };
-    drawHL(fy(trade.entry),'rgba(0,212,255,.9)','ENTRY $'+trade.entry.toFixed(2));
+    if(isFinite(trade.entry)) drawHL(fy(trade.entry), 'rgba(0,212,255,.9)', 'ENTRY $'+trade.entry.toFixed(2));
     if(trade.target&&isFinite(trade.target)) drawHL(fy(trade.target),'rgba(0,255,136,.9)','TARGET $'+trade.target.toFixed(2));
-    if(trade.stop&&isFinite(trade.stop))     drawHL(fy(trade.stop),'rgba(255,51,85,.9)','STOP $'+trade.stop.toFixed(2));
+    if(trade.stop  &&isFinite(trade.stop))   drawHL(fy(trade.stop),  'rgba(255,51,85,.9)', 'STOP $'+trade.stop.toFixed(2));
   }
 
-  // ── Prediction channel (prominent dashed line) ────────
-  if(showPred&&tech&&tech.pred_series&&tech.close_series){
-    const histLen=tech.close_series.filter(v=>v&&isFinite(v)).length;
-    const preds=tech.pred_series.filter(v=>isFinite(v));
-    if(preds.length>0){
-      // Historical regression line (subtle purple dashes through chart)
-      ctx.strokeStyle='rgba(179,102,255,.35)';ctx.lineWidth=1;ctx.setLineDash([3,6]);
-      ctx.beginPath();let ff=true;
-      preds.slice(0,histLen).forEach((v,i)=>{
-        if(!v||!isFinite(v)||v<LO*.85||v>HI*1.15)return;
-        const x=PL+i*cw+cw/2,y=fy(v);ff?(ctx.moveTo(x,y),ff=false):ctx.lineTo(x,y);
-      });
-      ctx.stroke();ctx.setLineDash([]);
-
-      // Future prediction — bright, wide, clearly labeled
-      const fut=preds.slice(histLen).filter(v=>v&&isFinite(v));
-      if(fut.length>0){
-        const lastI=histLen-1;
-        const lastX=PL+Math.min(lastI,bars.length-1)*cw+cw/2;
-        const lastPredV=preds[histLen-1]||bars[bars.length-1].c;
-        const lastY=isFinite(lastPredV)?fy(lastPredV):fy(bars[bars.length-1].c);
-        // Extend prediction 25% of chart width into the future zone
-        const futZoneW=Math.min(PW*0.25, PW-lastX+PL+4);
-        const endX=lastX+futZoneW;
-        const endV=fut[fut.length-1];
-        const endY=isFinite(endV)&&endV>LO*.85&&endV<HI*1.15?fy(endV):lastY;
-        const going_up=endV>lastPredV;
-
-        // Shaded prediction zone
-        ctx.fillStyle=going_up?'rgba(0,255,136,.06)':'rgba(255,51,85,.05)';
-        ctx.beginPath();ctx.moveTo(lastX,lastY);ctx.lineTo(endX,endY-8);ctx.lineTo(endX,endY+8);ctx.closePath();ctx.fill();
-
-        // Prediction line — thick, bright green/red
-        ctx.strokeStyle=going_up?'#00ff88':'#ff3355';ctx.lineWidth=3;ctx.setLineDash([8,3]);
-        ctx.beginPath();ctx.moveTo(lastX,lastY);
-        fut.forEach((v,i)=>{
-          if(!v||!isFinite(v))return;
-          const x=lastX+(i+1)*futZoneW/fut.length;
-          const y=v>LO*.85&&v<HI*1.15?fy(v):lastY;
-          ctx.lineTo(x,y);
-        });
-        ctx.stroke();ctx.setLineDash([]);
-
-        // Big prediction label box
-        const arrow=going_up?'▲':'▼';
-        const pLabel=arrow+' PRED $'+endV.toFixed(2);
-        ctx.font='bold 11px Inter';
-        const tw=ctx.measureText(pLabel).width;
-        const lx=Math.min(endX-2, W-PR-tw-4);
-        const ly2=endY+(going_up?-16:8);
-        ctx.fillStyle=going_up?'rgba(0,255,136,.15)':'rgba(255,51,85,.15)';
-        ctx.fillRect(lx-2,ly2-11,tw+6,14);
-        ctx.fillStyle=going_up?'#00ff88':'#ff3355';
-        ctx.fillText(pLabel,lx,ly2);
-
-        // Vertical dotted line at prediction boundary
-        ctx.strokeStyle='rgba(255,255,255,.12)';ctx.lineWidth=.8;ctx.setLineDash([2,4]);
-        ctx.beginPath();ctx.moveTo(lastX,PT);ctx.lineTo(lastX,h-PB);ctx.stroke();ctx.setLineDash([]);
-        ctx.fillStyle='rgba(255,255,255,.3)';ctx.font='7px Inter';
-        ctx.fillText('NOW',lastX-10,PT+8);
-      }
+  // ── Current price line ────────────────────────────────────────────
+  if (bars.length) {
+    const lp = bars[bars.length-1].c;
+    if (isFinite(lp)) {
+      const ly = fy(lp);
+      ctx.strokeStyle = 'rgba(255,255,255,.2)'; ctx.lineWidth = 1; ctx.setLineDash([3,5]);
+      ctx.beginPath(); ctx.moveTo(PL,ly); ctx.lineTo(W-PR,ly); ctx.stroke();
+      ctx.setLineDash([]);
+      // Price badge
+      const ptxt = '$'+lp.toFixed(2);
+      ctx.font = 'bold 10px Inter';
+      const tw = ctx.measureText(ptxt).width;
+      ctx.fillStyle = 'rgba(0,150,200,.3)'; ctx.fillRect(W-PR+2, ly-9, tw+8, 16);
+      ctx.strokeStyle = 'rgba(0,212,255,.7)'; ctx.lineWidth=.8; ctx.strokeRect(W-PR+2,ly-9,tw+8,16);
+      ctx.fillStyle = '#00d4ff'; ctx.fillText(ptxt, W-PR+6, ly+3);
     }
   }
 
-  // ── Swing high/low dots (supply/demand) ───────────────
-  if(tech&&bars.length>10){
-    for(let i=3;i<bars.length-3;i++){
-      const isHigh=bars[i].h>bars[i-1].h&&bars[i].h>bars[i-2].h&&bars[i].h>bars[i+1].h&&bars[i].h>bars[i+2].h;
-      const isLow= bars[i].l<bars[i-1].l&&bars[i].l<bars[i-2].l&&bars[i].l<bars[i+1].l&&bars[i].l<bars[i+2].l;
-      if(isHigh){
-        const x=PL+i*cw+cw/2,y=fy(bars[i].h)-5;
-        ctx.fillStyle='rgba(255,51,85,.85)';ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
-        if(i>bars.length-15){ctx.fillStyle='rgba(255,51,85,.6)';ctx.font='7px Inter';ctx.fillText('H',x-3,y-4);}
-      }
-      if(isLow){
-        const x=PL+i*cw+cw/2,y=fy(bars[i].l)+5;
-        ctx.fillStyle='rgba(0,255,136,.85)';ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();
-        if(i>bars.length-15){ctx.fillStyle='rgba(0,255,136,.6)';ctx.font='7px Inter';ctx.fillText('L',x-3,y+10);}
-      }
-    }
-  }
+  // ── PREDICTION line (the most important) ──────────────────────────
+  if (showPred && tech && tech.pred_series) {
+    const predSeries = tech.pred_series;
+    const nBars = bars.length;
+    // Draw historical regression (very subtle)
+    ctx.strokeStyle = 'rgba(179,102,255,.25)'; ctx.lineWidth = 1; ctx.setLineDash([2,6]);
+    ctx.beginPath(); let ff=true;
+    predSeries.slice(0, nBars).forEach((v,i) => {
+      if(!v||!isFinite(v)||v<LO*.9||v>HI*1.1) return;
+      const x=PL+i*cw+cw/2, y=fy(v);
+      ff ? (ctx.moveTo(x,y), ff=false) : ctx.lineTo(x,y);
+    });
+    ctx.stroke(); ctx.setLineDash([]);
 
-  // ── VWAP label (above VWAP = bullish zone) ────────────
-  if(tech&&tech.vwap&&isFinite(tech.vwap)&&bars.length){
-    const lp=bars[bars.length-1].c;
-    const vwapY=fy(tech.vwap);
-    const aboveVwap=lp>tech.vwap;
-    // Shade VWAP zone
-    ctx.fillStyle=aboveVwap?'rgba(0,255,136,.03)':'rgba(255,51,85,.03)';
-    ctx.fillRect(PL,aboveVwap?fy(lp):vwapY,PW,aboveVwap?vwapY-fy(lp):fy(lp)-vwapY);
-  }
+    // ── Future prediction arrow from last bar ─────────────────────
+    const lastPrice = bars[bars.length-1].c;
+    const predEnd   = tech.pred_30d || tech.pred_5d;
+    if (predEnd && isFinite(predEnd) && predEnd > 0) {
+      const lastX = PL + (nBars-1)*cw + cw/2;
+      const lastY = fy(lastPrice);
+      // Future zone: 18% of chart width, strictly inside bounds
+      const futW  = Math.min(PW*0.18, W-PR-lastX-8);
+      const endX  = Math.max(lastX+10, Math.min(lastX+futW, W-PR-8));
+      const endY  = fy(Math.max(LO*1.01, Math.min(HI*0.99, predEnd)));
+      const goUp  = predEnd > lastPrice;
+      const col   = goUp ? '#00ff88' : '#ff3355';
+      const pct   = ((predEnd-lastPrice)/lastPrice*100);
 
-  // ── Current price line + badge ────────────────────────
-  if(bars.length){
-    const lp=bars[bars.length-1].c;
-    if(isFinite(lp)){
-      const ly=fy(lp);
-      ctx.strokeStyle='rgba(255,255,255,.25)';ctx.setLineDash([3,5]);ctx.lineWidth=1;
-      ctx.beginPath();ctx.moveTo(PL,ly);ctx.lineTo(W-PR,ly);ctx.stroke();ctx.setLineDash([]);
-      // Price badge — bright box, always on top
-      const prTxt='$'+lp.toFixed(2);
-      ctx.font='bold 9px Inter';
-      const tw=ctx.measureText(prTxt).width;
-      ctx.fillStyle='rgba(0,180,255,.3)';ctx.fillRect(W-PR+1,ly-8,tw+7,15);
-      ctx.strokeStyle='rgba(0,212,255,.8)';ctx.lineWidth=.8;ctx.strokeRect(W-PR+1,ly-8,tw+7,15);
-      ctx.fillStyle='#00e5ff';ctx.fillText(prTxt,W-PR+4,ly+3);
+      // Shaded cone
+      ctx.fillStyle = goUp ? 'rgba(0,255,136,.06)' : 'rgba(255,51,85,.05)';
+      ctx.beginPath(); ctx.moveTo(lastX,lastY);
+      ctx.lineTo(endX,endY-5); ctx.lineTo(endX,endY+5);
+      ctx.closePath(); ctx.fill();
+
+      // Prediction line — thick, clearly visible
+      ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.setLineDash([7,4]);
+      ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(endX,endY);
+      ctx.stroke(); ctx.setLineDash([]);
+
+      // Arrow tip
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      const arrowSize = 5;
+      if (goUp) {
+        ctx.moveTo(endX,endY-arrowSize); ctx.lineTo(endX-3,endY+2); ctx.lineTo(endX+3,endY+2);
+      } else {
+        ctx.moveTo(endX,endY+arrowSize); ctx.lineTo(endX-3,endY-2); ctx.lineTo(endX+3,endY-2);
+      }
+      ctx.closePath(); ctx.fill();
+
+      // Label box — ALWAYS inside chart bounds
+      const lbl  = (goUp?'▲':'▼')+' PRED $'+predEnd.toFixed(2)+'  ('+( pct>=0?'+':'')+pct.toFixed(1)+'%)';
+      ctx.font = 'bold 10px Inter';
+      const tw   = ctx.measureText(lbl).width;
+      // Position: left of endX, above/below the line, never outside canvas
+      const lblX = Math.max(PL+4, Math.min(endX-tw-8, W-PR-tw-4));
+      const lblY = goUp
+        ? Math.max(PT+18, endY-12)
+        : Math.min(h-PB-8, endY+18);
+      // Box
+      ctx.fillStyle = 'rgba(10,15,26,.85)';
+      ctx.fillRect(lblX-3, lblY-12, tw+8, 16);
+      ctx.strokeStyle = col; ctx.lineWidth=1;
+      ctx.strokeRect(lblX-3, lblY-12, tw+8, 16);
+      // Text
+      ctx.fillStyle = col; ctx.fillText(lbl, lblX, lblY);
+
+      // "NOW" vertical marker
+      ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth=.8; ctx.setLineDash([2,4]);
+      ctx.beginPath(); ctx.moveTo(lastX,PT+4); ctx.lineTo(lastX,h-PB); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.font = 'bold 7px Inter';
+      ctx.fillText('NOW', lastX-12, PT+12);
     }
   }
 }
+
 
 // ══════════════════════════════════════════════════════════
 // AI CHAT

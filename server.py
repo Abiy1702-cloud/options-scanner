@@ -740,12 +740,42 @@ def compute_technicals(sym, df=None):
     # Long term: 12% stop, 35%+ target
     stop_lt   = round(entry * 0.88, 2)
     target_lt = round(entry * 1.40, 2)
-    # Prediction: simple linear regression on close
+    # Prediction: linear regression + momentum bias
+    # Pure regression often shows "down" on strong up days because the open-high-then-pullback
+    # pattern gives a negative intraday slope. We blend with today's momentum.
     x=np.arange(len(c)); coeffs=np.polyfit(x,c.values,1)
-    slope=coeffs[0]; pred_5d=round(float(np.polyval(coeffs,len(c)+1)),2)
-    pred_30d=round(float(np.polyval(coeffs,len(c)+6)),2)
-    pred_90d=round(float(np.polyval(coeffs,len(c)+18)),2)
-    trend='bullish' if slope>0 else 'bearish'
+    slope=coeffs[0]
+    reg_5d  = float(np.polyval(coeffs,len(c)+1))
+    reg_30d = float(np.polyval(coeffs,len(c)+6))
+    reg_90d = float(np.polyval(coeffs,len(c)+18))
+
+    # Momentum bias: use % change today to weight prediction toward continuation
+    chg_today = float(c.iloc[-1]-c.iloc[0])/float(c.iloc[0])*100 if float(c.iloc[0])>0 else 0
+    # Blend: 60% regression, 40% momentum-extrapolated price
+    mom_price = float(c.iloc[-1]) * (1 + chg_today/100 * 0.15)  # small forward extrapolation
+    blend = 0.4  # 40% weight on momentum when signal is bullish
+    if sig == 'BUY' and chg_today > 1:
+        pred_5d  = round(reg_5d  * (1-blend) + mom_price * blend, 2)
+        pred_30d = round(reg_30d * (1-blend) + float(c.iloc[-1]) * (1 + chg_today/100 * 0.1) * blend, 2)
+        pred_90d = round(reg_90d * (1-blend) + float(c.iloc[-1]) * (1 + chg_today/100 * 0.05) * blend, 2)
+    elif sig == 'SELL' and chg_today < -1:
+        # Bearish bias
+        bear_price = float(c.iloc[-1]) * (1 + chg_today/100 * 0.15)
+        pred_5d  = round(reg_5d  * (1-blend) + bear_price * blend, 2)
+        pred_30d = round(reg_30d * (1-blend) + bear_price * blend, 2)
+        pred_90d = round(reg_90d * (1-blend) + bear_price * blend, 2)
+    else:
+        pred_5d  = round(reg_5d, 2)
+        pred_30d = round(reg_30d, 2)
+        pred_90d = round(reg_90d, 2)
+
+    # Sanity clamp: prediction can't be more than 8% from current price in 5D
+    cur = float(c.iloc[-1])
+    pred_5d  = round(max(cur*0.92, min(cur*1.08, pred_5d)), 2)
+    pred_30d = round(max(cur*0.85, min(cur*1.20, pred_30d)), 2)
+    pred_90d = round(max(cur*0.75, min(cur*1.40, pred_90d)), 2)
+
+    trend = 'bullish' if slope > 0 or (sig=='BUY' and chg_today>2) else 'bearish'
     # Best mode
     daily_vol=float(c.pct_change().std()*100) if len(c)>5 else 2.0
     if daily_vol>4: best_mode='day'
@@ -772,7 +802,10 @@ def compute_technicals(sym, df=None):
         'ema20_series':ema20.tolist()[-80:],'ema50_series':ema50.tolist()[-80:],
         'bb_upper_series':bb_upper.tolist()[-80:],'bb_lower_series':bb_lower.tolist()[-80:],
         'close_series':c.tolist()[-80:],'times':[str(i)[-8:-3] if ' ' in str(i) else str(i)[-5:] for i in df.index[-80:]],
-        'slope':round(float(slope),4),'pred_series':[round(float(np.polyval(coeffs,xi)),2) for xi in range(max(0,len(c)-80),len(c)+20)],
+        'slope':round(float(slope),4),
+        # pred_series: aligned to last 80 bars exactly + 0 future points
+        # The chart frontend handles the future zone using pred_30d value
+        'pred_series':[round(float(np.polyval(coeffs,xi)),2) for xi in range(max(0,len(c)-80),len(c))],
         'bull_ema':bull_ema,'bull_pts':bull_pts
     }
 
@@ -859,7 +892,7 @@ def whale_score_and_recommend(sym, tech, whale_item=None):
 state = {
     'trades':{},         # id -> trade
     'completed':[],
-    'capital':{'day':5000.0,'swing':10000.0,'longterm':15000.0},
+    'capital':{'day':1000.0,'swing':1000.0,'longterm':1000.0},
     'starting':{'day':5000.0,'swing':10000.0,'longterm':15000.0},
     'pnl':{'day':0.0,'swing':0.0,'longterm':0.0},
     'whale_cache':[],
@@ -887,7 +920,7 @@ def load_state():
                 if k in snap: state[k]=snap[k]
             state['date']=today
         else:
-            state['capital']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
+            state['capital']={'day':1000.0,'swing':1000.0,'longterm':1000.0}
             state['starting']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
         # Always restore completed for history
         if 'completed' in snap: state['completed']=snap['completed'][-100:]
@@ -908,63 +941,108 @@ def add_log(msg, alert=False):
 import uuid
 
 def enter_trade(sym, mode, manual=False, whale_data=None):
-    """Enter day/swing/long-term trade"""
+    """
+    Enter a trade with strict quality gates:
+    - Minimum price $5 (no penny stocks/micro-caps)
+    - Max 3 concurrent positions total
+    - Position size: $200-250 per trade (risk ~$15-20 per trade = 1.5-2% of $1000)
+    - Cooldown: no re-entry within 2 hours of last exit on same stock
+    - 2:1 reward/risk ratio enforced on every trade
+    """
     if mode not in ('day','swing','longterm'):
         return False,'Invalid mode'
-    # Check existing
+
+    # ── Gate 1: Already in this symbol ───────────────────────────────
     for t in state['trades'].values():
-        if t['symbol']==sym and t['mode']==mode:
-            return False,f"Already in {sym} ({mode})"
-    # Price
-    cached=cp(sym)
+        if t['symbol'] == sym:
+            return False, f"Already in {sym}"
+
+    # ── Gate 2: Max 3 concurrent positions ───────────────────────────
+    if len(state['trades']) >= 3:
+        return False, 'Max 3 concurrent positions'
+
+    # ── Gate 3: Cooldown — no re-entry within 2 hours ────────────────
+    cutoff = time.time() - 7200  # 2 hours
+    recent_exits = [t for t in state['completed'][-20:]
+                    if t['symbol'] == sym and t.get('entered_at',0) > cutoff]
+    if recent_exits and not manual:
+        return False, f'{sym} cooldown (traded {len(recent_exits)}x recently)'
+
+    # ── Gate 4: Get live price ────────────────────────────────────────
+    cached = cp(sym)
     if not cached:
         try:
-            tk=yf.Ticker(sym); fi=tk.fast_info
-            p=float(getattr(fi,'last_price',0) or 0)
-            if p>0: cached={'price':p,'pct':0}
+            tk = yf.Ticker(sym); fi = tk.fast_info
+            p = float(getattr(fi,'last_price',0) or 0)
+            if p > 0: cached = {'price':p,'pct':0}
             else: return False,'No price'
         except: return False,'No price'
-    price=cached['price']
-    # Capital allocation
-    cap=state['capital'][mode]
-    n_open=sum(1 for t in state['trades'].values() if t['mode']==mode)
-    max_positions={'day':5,'swing':8,'longterm':12}
-    if n_open>=max_positions[mode]: return False,f"Max {max_positions[mode]} {mode} positions"
-    alloc_pct={'day':0.25,'swing':0.20,'longterm':0.15}
-    alloc=min(cap*alloc_pct[mode], cap/(max_positions[mode]-n_open+1))
-    if alloc<price: return False,f"Insufficient capital: ${cap:.0f}"
-    shares=int(alloc/price)
-    if shares<1: return False,'Need at least 1 share'
-    # Get technicals for stops/targets
-    tech=compute_technicals(sym)
-    tid=str(uuid.uuid4())[:8]
-    stop_key={'day':'stop_day','swing':'stop_swing','longterm':'stop_lt'}[mode]
-    target_key={'day':'target_day','swing':'target_swing','longterm':'target_lt'}[mode]
-    stop=tech[stop_key] if tech and tech.get(stop_key) else round(price*(1-{'day':.06,'swing':.10,'longterm':.12}[mode]),2)
-    target=tech[target_key] if tech and tech.get(target_key) else round(price*(1+{'day':.10,'swing':.20,'longterm':.35}[mode]),2)
-    # Hold duration
-    hold_map={'day':1,'swing':14,'longterm':90}
-    hold_days=hold_map[mode]
-    if whale_data: hold_days=max(hold_days,whale_data.get('hold_days',hold_days))
-    trade={
+    price = cached['price']
+
+    # ── Gate 5: Minimum price $5 — no penny stocks ───────────────────
+    if price < 5.0:
+        return False, f'{sym} price ${price:.2f} below $5 minimum'
+
+    # ── Gate 6: Capital check ─────────────────────────────────────────
+    cap = state['capital'].get('day', 1000.0)  # unified capital pool
+    # Position size: $200-250 per trade (25% of $1000)
+    alloc = min(250.0, cap * 0.25)
+    if cap < 200:
+        return False, f'Insufficient capital: ${cap:.0f}'
+    if alloc < price:
+        return False, f'Price ${price:.2f} exceeds alloc ${alloc:.0f}'
+
+    shares = max(1, int(alloc / price))
+    cost = round(shares * price, 2)
+
+    # ── Gate 7: Compute stops/targets with 2:1 R:R ───────────────────
+    tech = compute_technicals(sym)
+    # Hard stop: 2.5% below entry for day trades, 5% for swing
+    stop_pct = 0.025 if mode == 'day' else 0.05
+    stop = tech.get('stop_day' if mode=='day' else 'stop_swing') if tech else None
+    stop = stop if (stop and stop > price*(1-stop_pct*2)) else round(price*(1-stop_pct), 2)
+
+    # Target: minimum 2x the risk (2:1 R:R ratio)
+    risk = price - stop
+    target = tech.get('target_day' if mode=='day' else 'target_swing') if tech else None
+    min_target = round(price + risk*2, 2)  # 2:1 reward:risk minimum
+    target = max(target or min_target, min_target)
+    target = round(min(target, price*1.15), 2)  # cap at 15% gain
+
+    hold_days = 1 if mode=='day' else 14
+    if whale_data: hold_days = max(hold_days, whale_data.get('hold_days', hold_days))
+
+    tid = str(uuid.uuid4())[:8]
+    trade = {
         'id':tid,'symbol':sym,'mode':mode,'entry':round(price,2),'shares':shares,
-        'cost':round(shares*price,2),'stop':stop,'target':target,
+        'cost':cost,'stop':stop,'target':target,
         'current':round(price,2),'peak':round(price,2),'peak_pnl_pct':0.0,
         'entry_time':now_str(),'entered_at':time.time(),'manual':manual,
         'hold_days':hold_days,'exit_after':time.time()+hold_days*86400,
         'whale_confidence':whale_data.get('confidence',0) if whale_data else 0,
         'whale_sources':whale_data.get('sources',[]) if whale_data else [],
     }
-    state['trades'][tid]=trade
-    state['capital'][mode]=round(cap-trade['cost'],2)
+    state['trades'][tid] = trade
+    # Deduct from unified capital pool
+    state['capital']['day'] = round(cap - cost, 2)
     save_state()
-    stop_pct=round((price-stop)/price*100,1)
-    tgt_pct=round((target-price)/price*100,1)
-    add_log(f"{'MANUAL' if manual else 'AUTO'} ENTER {sym} [{mode.upper()}] {shares}sh @${price:.2f} | T=${target:.2f}(+{tgt_pct}%) S=${stop:.2f}(-{stop_pct}%)", alert=True)
+
+    risk_amt = round(risk*shares, 2)
+    reward_amt = round((target-price)*shares, 2)
+    rr = round(reward_amt/max(risk_amt,0.01), 1)
+    add_log(
+        f"{'MANUAL' if manual else 'AUTO'} ENTER {sym} [{mode.upper()}] {shares}sh @${price:.2f} "
+        f"| T=${target:.2f}(+${reward_amt}) S=${stop:.2f}(-${risk_amt}) R:R={rr}:1",
+        alert=True
+    )
     if alpaca_trading:
-        try: alpaca_trading.submit_order(MarketOrderRequest(symbol=sym,qty=shares,side=OrderSide.BUY,time_in_force=TimeInForce.DAY))
-        except Exception as e: print(f"Alpaca enter: {e}")
-    return True,f"Entered {sym} [{mode}]"
+        try:
+            alpaca_trading.submit_order(MarketOrderRequest(
+                symbol=sym,qty=shares,side=OrderSide.BUY,time_in_force=TimeInForce.DAY
+            ))
+        except Exception as e:
+            print(f"Alpaca enter {sym}: {e}")
+    return True, f"Entered {sym} [{mode}] {shares}sh @${price:.2f}"
 
 def close_trade(tid, reason='manual'):
     t=state['trades'].pop(tid,None)
@@ -977,7 +1055,10 @@ def close_trade(tid, reason='manual'):
     state['completed'].append({**t,'exit':sell,'exit_time':now_str(),'pnl':pnl,'pnl_pct':pnl_pct,'reason':reason})
     state['completed']=state['completed'][-200:]
     state['pnl'][mode]=round(state['pnl'][mode]+pnl,2)
-    state['capital'][mode]=round(state['capital'][mode]+proceeds,2)
+    state['capital']['day'] = round(state['capital'].get('day',0) + proceeds, 2)
+    # Also restore swing/lt pools proportionally if needed
+    if mode in ('swing','longterm'):
+        state['capital'][mode] = round(state['capital'].get(mode,0) + proceeds, 2)
     save_state()
     label={'target':'🎯 TARGET','stop':'🛑 STOP','manual':'✋ MANUAL','eod':'🌙 EOD','swing_exit':'📅 SWING EXIT','lt_exit':'📅 LT EXIT'}
     add_log(f"CLOSE {sym} [{mode.upper()}] {label.get(reason,reason)} ${pnl:+.2f} ({pnl_pct:+.1f}%)", alert=pnl>200 or reason=='target')
@@ -986,85 +1067,158 @@ def close_trade(tid, reason='manual'):
         except: pass
 
 def monitor_trades():
-    """Called every minute — update prices, check exits"""
+    """
+    Exit logic — runs every minute during market hours.
+    Philosophy: Cut losses FAST, let winners RUN.
+    - Hard stop: 2.5% loss → exit immediately
+    - Quick stop: if down 1.5% within first 30 min → exit (bad entry)
+    - Trailing stop: once up 3%, trail at 1.5% below peak
+    - Once up 5%, trail at 3% below peak (lock in gains)
+    - Target hit → exit immediately
+    - No holding overnight for day trades
+    """
     if not is_trading_day(): return
+    now_ts = time.time()
+
     for tid, t in list(state['trades'].items()):
-        cached=cp(t['symbol'])
+        cached = cp(t['symbol'])
         if not cached: continue
-        price=cached['price']
-        state['trades'][tid]['current']=price
-        peak=max(price,t.get('peak',price))
-        state['trades'][tid]['peak']=peak
-        pnl_pct=(price-t['entry'])/t['entry']*100
-        peak_pct=(peak-t['entry'])/t['entry']*100
-        state['trades'][tid]['peak_pnl_pct']=max(peak_pct,t.get('peak_pnl_pct',0))
-        mode=t['mode']
-        # Target hit
-        if price>=t['target']:
-            close_trade(tid,'target'); continue
-        # Stop hit
-        if price<=t['stop']:
-            close_trade(tid,'stop'); continue
-        # Day trade: trailing stop if peak>=3%
-        if mode=='day' and peak_pct>=3 and (peak_pct-pnl_pct)>=2:
-            close_trade(tid,'momentum_stall'); continue
-        # Swing: time exit
-        if mode=='swing' and time.time()>t.get('exit_after',0) and not is_market_open():
-            close_trade(tid,'swing_exit'); continue
-        # Long term: only exit on big loss or huge gain
-        if mode=='longterm' and pnl_pct<=-15:
-            close_trade(tid,'stop'); continue
+        price  = cached['price']
+        entry  = t['entry']
+        peak   = max(price, t.get('peak', price))
+        state['trades'][tid]['current'] = price
+        state['trades'][tid]['peak']    = peak
+        pnl_pct  = (price - entry) / entry * 100
+        peak_pct = (peak  - entry) / entry * 100
+        state['trades'][tid]['peak_pnl_pct'] = max(peak_pct, t.get('peak_pnl_pct',0))
+        held_min = (now_ts - t.get('entered_at', now_ts)) / 60
+
+        # ── TARGET HIT ────────────────────────────────────────────────
+        if price >= t['target']:
+            close_trade(tid, 'target'); continue
+
+        # ── HARD STOP (fixed) ─────────────────────────────────────────
+        if price <= t['stop']:
+            close_trade(tid, 'stop'); continue
+
+        # ── QUICK STOP: down 1.5% within first 30 min = bad entry ────
+        if pnl_pct <= -1.5 and held_min < 30 and not t.get('manual'):
+            close_trade(tid, 'quick_stop'); continue
+
+        # ── TRAILING STOP LOGIC ───────────────────────────────────────
+        if peak_pct >= 5.0:
+            # Up 5%+ → trail at 3% below peak (lock in ~2%)
+            trail_stop = round(peak * 0.97, 2)
+            if price <= trail_stop:
+                close_trade(tid, 'trail_5pct'); continue
+            # Also update hard stop upward
+            state['trades'][tid]['stop'] = max(t['stop'], trail_stop)
+
+        elif peak_pct >= 3.0:
+            # Up 3%+ → trail at 1.5% below peak
+            trail_stop = round(peak * 0.985, 2)
+            if price <= trail_stop:
+                close_trade(tid, 'trail_3pct'); continue
+            state['trades'][tid]['stop'] = max(t['stop'], trail_stop)
+
+        # ── EOD EXIT: close day trades 15 min before close ───────────
+        if t['mode'] == 'day':
+            et = datetime.now(pytz.timezone('US/Eastern'))
+            mins_to_close = (16*60) - (et.hour*60 + et.minute)
+            if mins_to_close <= 15:
+                close_trade(tid, 'eod'); continue
+
+        # ── SWING TIME EXIT ───────────────────────────────────────────
+        if t['mode'] == 'swing' and now_ts > t.get('exit_after', 0) and not is_market_open():
+            close_trade(tid, 'swing_exit'); continue
+
+        # ── SIGNAL REVERSAL EXIT ─────────────────────────────────────
+        # If we're up and signal flips to SELL → take profits
+        if pnl_pct >= 1.0 and held_min > 30:
+            cached_tech = state.get('analysis_cache',{}).get(t['symbol'],{}).get('tech')
+            if cached_tech and cached_tech.get('signal') == 'SELL':
+                close_trade(tid, 'signal_reversal'); continue
+
+def reset_daily_capital():
+    """Reset capital at start of each trading day"""
+    state['capital'] = {'day':1000.0,'swing':1000.0,'longterm':1000.0}
+    save_state()
+    print("  Capital reset to $1000/pool for new trading day")
 
 def whale_auto_enter():
     """
-    Auto-enter high-conviction signals during market hours.
-    Two paths:
-    1. Whale picks with display_score >= 75 + BUY signal
-    2. Direct watchlist scan — always check WATCHLIST for BUY signals
+    Auto-enter ONLY the best signal — quality over quantity.
+    Rules:
+    - Max 3 trades total at any time
+    - Only BUY signal + RSI 30-65 (not overbought, not falling knife)
+    - Must be above VWAP
+    - Need 3+ bull points
+    - Minimum $5 stock price (enforced in enter_trade too)
+    - No same stock within 2 hours (enforced in enter_trade)
     """
     if not is_market_open(): return
+    if len(state['trades']) >= 3: return  # already at max positions
 
-    entered_syms = set(t['symbol'] for t in state['trades'].values())
+    entered_syms = {t['symbol'] for t in state['trades'].values()}
 
-    # ── PATH 1: Whale picks ───────────────────────────────────────────
-    whale_data = get_whale_data()
-    combined   = whale_data.get('combined', [])
-    for w in combined[:20]:
-        sym = w['symbol']
-        if sym in entered_syms: continue
-        score = w.get('display_score') or w.get('confidence', 0)
-        if score < 72: continue  # minimum bar
-        tech = compute_technicals(sym)
-        if not tech or tech.get('signal') != 'BUY': continue
-        if tech.get('rsi', 50) > 75: continue  # not overbought
-        rec  = whale_score_and_recommend(sym, tech, w)
-        mode = rec['rec_mode']
-        ok, msg = enter_trade(sym, mode, manual=False, whale_data=w)
-        if ok:
-            entered_syms.add(sym)
-            add_log(f"🐋 WHALE AUTO ENTRY {sym} [{mode.upper()}] Score:{score}/99 Signal:BUY RSI:{tech.get('rsi',0):.0f}", alert=True)
+    # Score all candidates — best signal wins
+    candidates = []
 
-    # ── PATH 2: Direct watchlist scan — catches BUY signals not in whale picks ──
-    priority = ['NVDA','MU','DRAM','AMD','TSLA','AAPL','MSFT','SOXL','TQQQ',
-                'PLTR','MSTR','COIN','AVGO','SMCI','SOFI','RKLB','HIMS','APP']
+    # Priority watchlist — quality stocks only
+    priority = [
+        'NVDA','MSFT','AAPL','AMZN','META','GOOGL','AMD',
+        'TSLA','AVGO','MU','PLTR','SOFI','DRAM',
+        'SOXL','TQQQ','RKLB','APP','HIMS','COIN'
+    ]
+
     for sym in priority:
         if sym in entered_syms: continue
-        if len(state['trades']) >= 5: break  # max 5 concurrent trades
+        if len(candidates) >= 10: break
         try:
             tech = compute_technicals(sym)
-            if not tech or tech.get('signal') != 'BUY': continue
-            rsi = tech.get('rsi', 50)
-            if rsi > 75 or rsi < 20: continue
+            if not tech: continue
+            sig      = tech.get('signal','WAIT')
+            rsi      = tech.get('rsi', 50) or 50
             bull_pts = tech.get('bull_pts', 0)
-            if bull_pts < 3: continue  # need at least 3 bullish factors
-            rec  = whale_score_and_recommend(sym, tech, None)
-            mode = rec['rec_mode']
-            ok, msg = enter_trade(sym, mode, manual=False, whale_data=None)
-            if ok:
-                entered_syms.add(sym)
-                add_log(f"📈 WATCHLIST AUTO ENTRY {sym} [{mode.upper()}] BUY RSI:{rsi:.0f} Bulls:{bull_pts}/4 VWAP:{'✅' if tech.get('above_vwap') else '❌'}", alert=True)
+            above_vw = tech.get('above_vwap', False)
+            price    = tech.get('price', 0) or 0
+
+            # Strict entry gates
+            if sig != 'BUY':          continue
+            if rsi > 65:              continue  # overbought — wait for pullback
+            if rsi < 30:              continue  # falling knife
+            if not above_vw:          continue  # below VWAP = institutional selling
+            if bull_pts < 3:          continue  # need 3+ confirming factors
+            if price < 5:             continue  # no penny stocks
+
+            # Score this candidate
+            score = bull_pts * 10 + (65-rsi)    # higher score = better entry
+            if tech.get('macd_bull'): score += 10
+            if tech.get('near_support'): score += 8
+
+            candidates.append({'sym':sym,'score':score,'tech':tech,'rsi':rsi,'bull_pts':bull_pts})
         except Exception as e:
-            print(f"  watchlist scan {sym}: {e}")
+            print(f"  auto_enter scan {sym}: {e}")
+
+    if not candidates:
+        return
+
+    # Take ONLY the top 1-2 candidates
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+    for c in candidates[:2]:
+        if len(state['trades']) >= 3: break
+        sym  = c['sym']
+        tech = c['tech']
+        mode = 'day'  # default to day trade for $1000 account
+        ok, msg = enter_trade(sym, mode, manual=False, whale_data=None)
+        if ok:
+            entered_syms.add(sym)
+            add_log(
+                f"📈 AUTO ENTRY {sym} [{mode.upper()}] "
+                f"BUY RSI:{c['rsi']:.0f} Bulls:{c['bull_pts']}/4 Score:{c['score']} "
+                f"VWAP✅ MACD:{'✅' if tech.get('macd_bull') else '❌'}",
+                alert=True
+            )
 
 # ── AI ANALYSIS ───────────────────────────────────────────────────────
 def ai_analyze(sym, tech, whale=None, mode=None):
@@ -1158,11 +1312,12 @@ def job_morning():
     if not is_trading_day(): return
     state['date']=today_str()
     state['pnl']={'day':0.0,'swing':0.0,'longterm':0.0}
-    state['capital']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
-    state['starting']={'day':5000.0,'swing':10000.0,'longterm':15000.0}
-    add_log("🌅 New trading day started")
+    state['capital']={'day':1000.0,'swing':1000.0,'longterm':1000.0}
+    state['starting']={'day':1000.0,'swing':1000.0,'longterm':1000.0}
+    state['capital'] ={'day':1000.0,'swing':1000.0,'longterm':1000.0}
+    add_log("🌅 New trading day — capital reset to $1000/pool")
     refresh_whale_data()
-    tg(f"🌅 AutoTrade Pro — {today_str()} open\nWhale scan running...")
+    tg(f"🌅 AutoTrade Pro — {today_str()} open\nCapital: $1000 | Whale scan running...")
 
 def job_minute():
     if not is_trading_day(): return
