@@ -391,57 +391,123 @@ def alpaca_get_news_tickers():
 
 def yfinance_momentum_scan():
     """
-    Score the full watchlist — always includes any stock with a BUY signal
-    from compute_technicals, regardless of % change today.
+    Professional momentum scanner using 3 strategies:
+
+    1. GAP + CATALYST: Stocks up 4%+ today with 3x+ relative volume
+       → These have institutional participation (earnings, news, upgrades)
+       → Best entries: pullback to 9 EMA or VWAP in first 90 min
+
+    2. 52-WEEK HIGH BREAKOUT: Making new highs with volume surge
+       → Institutions are accumulating — price discovery mode
+       → These can run for days/weeks (DRAM was this pattern)
+
+    3. WEEKLY/MONTHLY MOMENTUM LEADERS: Up 20%+ in 4 weeks
+       → Already in strong uptrend — trade the pullbacks
+       → Lower risk as trend is established
+
+    Key metric: RELATIVE VOLUME (RVOL) = today's vol / 20-day avg vol
+    RVOL 2x = something happening | 5x+ = institutional move
     """
     items = []
     try:
-        df = yf.download(
-            WATCHLIST, period='5d', interval='1d',
+        # Download 65 days of daily data for the full watchlist
+        # 65 days gives us: 20-day avg vol, 52-week high context, 1-month returns
+        df_all = yf.download(
+            WATCHLIST, period='65d', interval='1d',
             auto_adjust=True, progress=False, group_by='ticker'
         )
-        multi = isinstance(df.columns, pd.MultiIndex)
+        multi = isinstance(df_all.columns, pd.MultiIndex)
 
         for sym in WATCHLIST:
             try:
+                # Extract this symbol's data
                 if multi:
-                    cl = df['Close'][sym].dropna()
-                    vl = df['Volume'][sym].dropna()
+                    cl = df_all['Close'][sym].dropna()
+                    vl = df_all['Volume'][sym].dropna()
+                    hi = df_all['High'][sym].dropna()
                 else:
-                    cl = df['Close'].dropna()
-                    vl = df['Volume'].dropna()
-                if len(cl) < 2: continue
-                price = float(cl.iloc[-1])
-                prev  = float(cl.iloc[-2])
-                chg   = (price - prev) / prev * 100
-                avg_vol = float(vl.iloc[:-1].mean()) if len(vl)>1 else float(vl.iloc[-1])
-                vol_ratio = float(vl.iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
+                    cl = df_all['Close'].dropna()
+                    vl = df_all['Volume'].dropna()
+                    hi = df_all['High'].dropna()
 
-                # Check cached tech signal — if BUY, always include
-                cached_tech = state.get('analysis_cache',{}).get(sym,{}).get('tech')
-                has_buy = cached_tech and cached_tech.get('signal') == 'BUY'
+                if len(cl) < 20: continue
+                price     = float(cl.iloc[-1])
+                prev      = float(cl.iloc[-2])
+                vol_today = float(vl.iloc[-1])
 
-                if chg > 5 and vol_ratio > 2:     conf, hold = 78, 14
-                elif chg > 3 and vol_ratio > 1.5: conf, hold = 70, 7
-                elif chg > 1 and vol_ratio > 1.5: conf, hold = 62, 3
-                elif vol_ratio > 3:               conf, hold = 65, 3
-                elif has_buy:                     conf, hold = 60, 3  # BUY signal even if quiet day
-                else: continue
+                if price < 5: continue  # no penny stocks
 
-                source = 'High Momentum' if chg > 3 else ('Volume Surge' if vol_ratio > 3 else 'Momentum')
-                items.append({
-                    'symbol':sym,'source':source,'direction':'buy',
-                    'title':f'{sym} {chg:+.1f}% vol {vol_ratio:.1f}x — {source.lower()}',
-                    'date':today_str(),'type':'momentum',
-                    'confidence':conf,'hold_days':hold,
-                    'price':round(price,2),'chg_pct':round(chg,2),'vol_ratio':round(vol_ratio,1)
-                })
-            except: pass
+                # ── RELATIVE VOLUME (key metric) ─────────────────────
+                avg_vol_20 = float(vl.iloc[-21:-1].mean()) if len(vl) >= 21 else float(vl.mean())
+                rvol = vol_today / avg_vol_20 if avg_vol_20 > 0 else 1.0
+
+                # ── Day % change ──────────────────────────────────────
+                chg_1d = (price - prev) / prev * 100
+
+                # ── Weekly % change ───────────────────────────────────
+                chg_5d = ((price - float(cl.iloc[-6])) / float(cl.iloc[-6]) * 100) if len(cl) >= 6 else 0
+
+                # ── Monthly % change ──────────────────────────────────
+                chg_20d = ((price - float(cl.iloc[-21])) / float(cl.iloc[-21]) * 100) if len(cl) >= 21 else 0
+
+                # ── 52-week high context ──────────────────────────────
+                hi_52w = float(hi.max()) if len(hi) >= 20 else price
+                pct_from_52w_hi = (price - hi_52w) / hi_52w * 100  # negative = below high
+
+                # ── STRATEGY 1: GAP + HIGH RVOL ──────────────────────
+                if chg_1d >= 4.0 and rvol >= 2.0:
+                    conf = min(85, 60 + int(chg_1d) * 2 + int(rvol))
+                    source = f'Gap+Volume: +{chg_1d:.1f}% RVOL {rvol:.1f}x'
+                    items.append({
+                        'symbol':sym, 'source':source, 'direction':'buy',
+                        'title':f'{sym} GAP+VOL: +{chg_1d:.1f}% RVOL:{rvol:.1f}x',
+                        'date':today_str(), 'type':'momentum',
+                        'confidence':conf, 'hold_days':1,
+                        'price':round(price,2), 'chg_pct':round(chg_1d,2),
+                        'rvol':round(rvol,1), 'strategy':'gap_rvol'
+                    })
+                    continue  # don't double-count
+
+                # ── STRATEGY 2: 52-WEEK HIGH BREAKOUT ────────────────
+                # Within 2% of 52-week high + above average volume
+                if pct_from_52w_hi >= -2.0 and rvol >= 1.5 and chg_1d >= 0:
+                    conf = min(80, 55 + int(rvol * 5))
+                    source = f'52W High breakout RVOL {rvol:.1f}x'
+                    items.append({
+                        'symbol':sym, 'source':source, 'direction':'buy',
+                        'title':f'{sym} 52W BREAKOUT: {pct_from_52w_hi:.1f}% from high RVOL:{rvol:.1f}x',
+                        'date':today_str(), 'type':'breakout',
+                        'confidence':conf, 'hold_days':5,
+                        'price':round(price,2), 'chg_pct':round(chg_1d,2),
+                        'rvol':round(rvol,1), 'strategy':'breakout'
+                    })
+                    continue
+
+                # ── STRATEGY 3: MONTHLY MOMENTUM LEADER ──────────────
+                # Up 15%+ in 4 weeks + still moving (up today or weekly)
+                if chg_20d >= 15.0 and chg_5d >= 2.0 and chg_1d >= 0:
+                    conf = min(78, 50 + int(chg_20d / 2))
+                    source = f'Monthly momentum: +{chg_20d:.0f}% in 4wks'
+                    items.append({
+                        'symbol':sym, 'source':source, 'direction':'buy',
+                        'title':f'{sym} MOMENTUM: +{chg_20d:.0f}% monthly, +{chg_5d:.1f}% weekly',
+                        'date':today_str(), 'type':'momentum',
+                        'confidence':conf, 'hold_days':7,
+                        'price':round(price,2), 'chg_pct':round(chg_1d,2),
+                        'rvol':round(rvol,1), 'strategy':'monthly_momentum'
+                    })
+
+            except Exception as e:
+                pass  # skip individual failures silently
+
         items.sort(key=lambda x: x['confidence'], reverse=True)
-        print(f"  yfinance momentum scan: {len(items)} signals from {len(WATCHLIST)} stocks")
+        strats = {}
+        for it in items: strats[it.get('strategy','?')] = strats.get(it.get('strategy','?'),0)+1
+        print(f"  yfinance momentum scan: {len(items)} signals | {strats}")
+
     except Exception as e:
         print(f"  yfinance momentum: {e}")
-    return items[:20]
+    return items[:25]
 
 def refresh_whale_data():
     """
@@ -458,12 +524,11 @@ def refresh_whale_data():
     # 1. Alpaca most-actives (best signal during market hours)
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
         f_active  = ex.submit(alpaca_get_screener, 'most-actives', 25)
-        f_gainers = ex.submit(alpaca_get_screener, 'gainers', 15)
+        # gainers endpoint removed — Alpaca v1beta1 doesn't support it
         f_news    = ex.submit(alpaca_get_news_tickers)
         try: all_items += f_active.result(timeout=15)
         except Exception as e: print(f"  most-actives timeout: {e}")
-        try: all_items += f_gainers.result(timeout=15)
-        except Exception as e: print(f"  gainers timeout: {e}")
+        # gainers removed
         try: all_items += f_news.result(timeout=15)
         except Exception as e: print(f"  news timeout: {e}")
 

@@ -1467,7 +1467,9 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   HI += PAD; LO -= PAD;
   const RNG = HI - LO || 1;
   const fy  = v => PT + PH - ((v - LO) / RNG * PH);
-  const cw  = PW / bars.length;
+  // Leave 18% of chart for prediction zone — candles use 82%
+  const chartW = Math.floor(PW * 0.82);
+  const cw  = chartW / bars.length;
 
   // ── Volume panel ──────────────────────────────────────────────────
   const volTop  = h + 3;
@@ -1591,78 +1593,71 @@ function drawChart(canvas, bars, tech, h=180, showPred=false, trade=null) {
   }
 
   // ── PREDICTION line (the most important) ──────────────────────────
-  if (showPred && tech && tech.pred_series) {
-    const predSeries = tech.pred_series;
-    const nBars = bars.length;
-    // Draw historical regression (very subtle)
-    ctx.strokeStyle = 'rgba(179,102,255,.25)'; ctx.lineWidth = 1; ctx.setLineDash([2,6]);
-    ctx.beginPath(); let ff=true;
-    predSeries.slice(0, nBars).forEach((v,i) => {
-      if(!v||!isFinite(v)||v<LO*.9||v>HI*1.1) return;
-      const x=PL+i*cw+cw/2, y=fy(v);
-      ff ? (ctx.moveTo(x,y), ff=false) : ctx.lineTo(x,y);
-    });
-    ctx.stroke(); ctx.setLineDash([]);
-
-    // ── Future prediction arrow from last bar ─────────────────────
+  if (showPred && tech && (tech.pred_30d || tech.pred_5d)) {
     const lastPrice = bars[bars.length-1].c;
     const predEnd   = tech.pred_30d || tech.pred_5d;
+
     if (predEnd && isFinite(predEnd) && predEnd > 0) {
-      const lastX = PL + (nBars-1)*cw + cw/2;
+      // Start from RIGHT EDGE of last candle (not center)
+      const lastX = PL + bars.length * cw;  // right edge of all candles
       const lastY = fy(lastPrice);
-      // Future zone: 18% of chart width, strictly inside bounds
-      const futW  = Math.min(PW*0.18, W-PR-lastX-8);
-      const endX  = Math.max(lastX+10, Math.min(lastX+futW, W-PR-8));
-      const endY  = fy(Math.max(LO*1.01, Math.min(HI*0.99, predEnd)));
-      const goUp  = predEnd > lastPrice;
-      const col   = goUp ? '#00ff88' : '#ff3355';
-      const pct   = ((predEnd-lastPrice)/lastPrice*100);
 
-      // Shaded cone
-      ctx.fillStyle = goUp ? 'rgba(0,255,136,.06)' : 'rgba(255,51,85,.05)';
-      ctx.beginPath(); ctx.moveTo(lastX,lastY);
-      ctx.lineTo(endX,endY-5); ctx.lineTo(endX,endY+5);
-      ctx.closePath(); ctx.fill();
-
-      // Prediction line — thick, clearly visible
-      ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.setLineDash([7,4]);
-      ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(endX,endY);
-      ctx.stroke(); ctx.setLineDash([]);
-
-      // Arrow tip
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      const arrowSize = 5;
-      if (goUp) {
-        ctx.moveTo(endX,endY-arrowSize); ctx.lineTo(endX-3,endY+2); ctx.lineTo(endX+3,endY+2);
-      } else {
-        ctx.moveTo(endX,endY+arrowSize); ctx.lineTo(endX-3,endY-2); ctx.lineTo(endX+3,endY-2);
-      }
-      ctx.closePath(); ctx.fill();
-
-      // Label box — ALWAYS inside chart bounds
-      const lbl  = (goUp?'▲':'▼')+' PRED $'+predEnd.toFixed(2)+'  ('+( pct>=0?'+':'')+pct.toFixed(1)+'%)';
-      ctx.font = 'bold 10px Inter';
-      const tw   = ctx.measureText(lbl).width;
-      // Position: left of endX, above/below the line, never outside canvas
-      const lblX = Math.max(PL+4, Math.min(endX-tw-8, W-PR-tw-4));
-      const lblY = goUp
-        ? Math.max(PT+18, endY-12)
-        : Math.min(h-PB-8, endY+18);
-      // Box
-      ctx.fillStyle = 'rgba(10,15,26,.85)';
-      ctx.fillRect(lblX-3, lblY-12, tw+8, 16);
-      ctx.strokeStyle = col; ctx.lineWidth=1;
-      ctx.strokeRect(lblX-3, lblY-12, tw+8, 16);
-      // Text
-      ctx.fillStyle = col; ctx.fillText(lbl, lblX, lblY);
-
-      // "NOW" vertical marker
-      ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.lineWidth=.8; ctx.setLineDash([2,4]);
-      ctx.beginPath(); ctx.moveTo(lastX,PT+4); ctx.lineTo(lastX,h-PB); ctx.stroke();
+      // "NOW" vertical separator — marks where history ends
+      ctx.strokeStyle = 'rgba(255,255,255,.2)'; ctx.lineWidth = 1; ctx.setLineDash([3,4]);
+      ctx.beginPath(); ctx.moveTo(lastX, PT+2); ctx.lineTo(lastX, h-PB); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.font = 'bold 7px Inter';
-      ctx.fillText('NOW', lastX-12, PT+12);
+      ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.font = 'bold 7px Inter';
+      ctx.fillText('NOW', Math.min(lastX-16, W-PR-30), PT+10);
+
+      // Future space — extends to right margin
+      const availW = (W - PR - lastX - 4);
+      if (availW < 10) {
+        // Not enough space — just show label on right axis
+      } else {
+        const endX  = W - PR - 4;
+        const goUp  = predEnd > lastPrice;
+        const col   = goUp ? '#00ff88' : '#ff3355';
+        const pct   = ((predEnd - lastPrice) / lastPrice * 100);
+        const clampedPred = Math.max(LO * 1.005, Math.min(HI * 0.995, predEnd));
+        const endY  = fy(clampedPred);
+
+        // Very light future zone tint
+        ctx.fillStyle = goUp ? 'rgba(0,255,136,.04)' : 'rgba(255,51,85,.03)';
+        ctx.fillRect(lastX, PT, availW, h - PT - PB);
+
+        // Dashed prediction line — thick and clear
+        ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.setLineDash([8, 4]);
+        ctx.beginPath(); ctx.moveTo(lastX, lastY); ctx.lineTo(endX, endY);
+        ctx.stroke(); ctx.setLineDash([]);
+
+        // Arrow at tip
+        const asz = 6;
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        if (goUp) {
+          ctx.moveTo(endX, endY-asz); ctx.lineTo(endX-4, endY+3); ctx.lineTo(endX+4, endY+3);
+        } else {
+          ctx.moveTo(endX, endY+asz); ctx.lineTo(endX-4, endY-3); ctx.lineTo(endX+4, endY-3);
+        }
+        ctx.closePath(); ctx.fill();
+
+        // Label — positioned in the future zone, always readable
+        const lbl = (goUp?'▲':'▼') + ' $' + predEnd.toFixed(2) + ' (' + (pct>=0?'+':'') + pct.toFixed(1) + '%)';
+        ctx.font = 'bold 10px Inter';
+        const tw = ctx.measureText(lbl).width;
+        // Center label in future zone
+        const lblX = Math.max(lastX+2, Math.min(lastX + (availW-tw)/2, W-PR-tw-4));
+        const lblY = goUp
+          ? Math.max(PT+16, endY-16)
+          : Math.min(h-PB-6, endY+20);
+        // Box
+        ctx.fillStyle = 'rgba(6,12,22,.92)';
+        ctx.fillRect(lblX-3, lblY-13, tw+8, 17);
+        ctx.strokeStyle = col; ctx.lineWidth = 1;
+        ctx.strokeRect(lblX-3, lblY-13, tw+8, 17);
+        ctx.fillStyle = col;
+        ctx.fillText(lbl, lblX, lblY);
+      }
     }
   }
 }
