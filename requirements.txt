@@ -5,3 +5,4 @@ pandas
 numpy
 APScheduler
 pytz
+websocket-client>=1.7

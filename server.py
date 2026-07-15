@@ -29,6 +29,11 @@ try:
 except Exception:
     BackgroundScheduler = None
 
+try:
+    import websocket as ws_client   # websocket-client package
+except Exception:
+    ws_client = None
+
 # ── Config ────────────────────────────────────────────────────────────
 PORT           = int(os.environ.get('PORT', 10000))
 ALPACA_KEY     = os.environ.get('ALPACA_API_KEY', '')
@@ -44,8 +49,6 @@ UA             = 'MarketScannerPro/5.0'
 
 STARTING_CAPITAL = float(os.environ.get('STARTING_CAPITAL', 1000))
 RISK_PER_TRADE   = 0.01     # 1% of equity risked per trade
-MAX_DAY_TRADES   = 2        # concurrent day positions
-MAX_SWING_TRADES = 3        # concurrent swing positions
 DAY_POS_CAP      = 0.30     # max 30% of equity in one day trade
 SWING_POS_CAP    = 0.25     # max 25% of equity in one swing trade
 MIN_PRICE        = 2.0
@@ -53,6 +56,16 @@ MAX_PRICE        = 2000.0
 MIN_DOLLAR_VOL   = 5e6      # $5M+ traded today = liquid enough
 DAILY_LOSS_LIMIT = 0.03     # stop auto-trading if down 3% on the day
 SWING_MAX_DAYS   = 10       # trading days a swing may be held
+
+# ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
+# MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
+MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.90))  # never deploy more than 90% of equity across all open positions
+SYMBOL_COOLDOWN_SEC  = int(os.environ.get('SYMBOL_COOLDOWN_SEC', 900))  # 15 min before re-entering a symbol just exited (win or loss) — stops VEEE-style churn
+MAX_ENTRIES_PER_SYMBOL_DAY = int(os.environ.get('MAX_ENTRIES_PER_SYMBOL_DAY', 2))  # hard cap on repeat entries into one symbol per day
+
+ALPACA_DATA_FEED = os.environ.get('ALPACA_DATA_FEED', 'iex')   # 'iex' = free real-time feed, 'sip' = paid full-tape feed
+# NOTE: this build is SIMULATED TRACKING ONLY — no live or paper orders are sent to
+# Alpaca's Trading API. Real-money execution is a separate, deliberate next step.
 
 # Core liquid names — fallback universe if all screeners fail
 CORE = ['NVDA','TSLA','AMD','AAPL','MSFT','META','AMZN','GOOGL','PLTR','COIN',
@@ -74,6 +87,9 @@ state = {
     'scan': {'day': [], 'swing': [], 'ts': 0, 'universe': 0},
     'prices': {}, 'price_ts': 0,
     'tg_status': {'ok': None, 'error': 'not tested yet', 't': ''},
+    'symbol_cooldown': {},          # {symbol: last_exit_epoch}
+    'symbol_entries': {'date': '', 'counts': {}},  # entries per symbol today
+    'stream_status': {'connected': False, 'authed': False, 'error': '', 'last_tick': 0, 'symbols': 0},
 }
 _lock = threading.Lock()
 
@@ -385,6 +401,7 @@ def deep_scan():
 def run_scan(announce=False):
     day, swing, n = deep_scan()
     state['scan'] = {'day': day, 'swing': swing, 'ts': time.time(), 'universe': n}
+    stream_set_symbols()
     log(f'Scan done: universe {n} → {len(day)} day / {len(swing)} swing candidates')
     if announce and (day or swing):
         msg = f'🔎 Scan {now_str()} — universe {n} stocks\n'
@@ -483,26 +500,146 @@ def refresh_prices():
 def cp(sym): return state['prices'].get(sym)
 
 # ══════════════════════════════════════════════════════════════════════
+# REAL-TIME STREAM — Alpaca market-data WebSocket (push prices, no polling)
+# Replaces "wait up to a minute for a price" with sub-second trade ticks for
+# every open position + current scan candidates. Falls back silently to the
+# existing refresh_prices() polling if no Alpaca keys are configured.
+# ══════════════════════════════════════════════════════════════════════
+_stream_lock = threading.Lock()
+_stream_ws = None
+_stream_subs = set()
+_stream_authed = False
+
+def _stream_symbols_wanted():
+    syms = {t['symbol'] for t in state['trades'].values()}
+    for c in state['scan'].get('day', [])[:15]:   syms.add(c['symbol'])
+    for c in state['scan'].get('swing', [])[:15]: syms.add(c['symbol'])
+    syms |= {'SPY', 'QQQ'}
+    return syms
+
+def stream_set_symbols():
+    """Diff current vs. wanted subscriptions and (un)subscribe on the open socket."""
+    if not (ws_client and ALPACA_KEY and ALPACA_SECRET): return
+    wanted = _stream_symbols_wanted()
+    with _stream_lock:
+        if not (_stream_ws and _stream_authed): return
+        add = wanted - _stream_subs
+        rem = _stream_subs - wanted
+        try:
+            if add:
+                _stream_ws.send(json.dumps({'action': 'subscribe', 'trades': sorted(add)}))
+                _stream_subs.update(add)
+            if rem:
+                _stream_ws.send(json.dumps({'action': 'unsubscribe', 'trades': sorted(rem)}))
+                _stream_subs.difference_update(rem)
+            state['stream_status']['symbols'] = len(_stream_subs)
+        except Exception as e:
+            print(f'stream_set_symbols: {e}')
+
+def _on_stream_open(wsapp):
+    global _stream_authed
+    _stream_authed = False
+    wsapp.send(json.dumps({'action': 'auth', 'key': ALPACA_KEY, 'secret': ALPACA_SECRET}))
+
+def _on_stream_message(wsapp, message):
+    global _stream_authed
+    try:
+        msgs = json.loads(message)
+    except Exception:
+        return
+    for m in msgs:
+        t = m.get('T')
+        if t == 'success' and m.get('msg') == 'authenticated':
+            _stream_authed = True
+            state['stream_status'].update({'connected': True, 'authed': True, 'error': ''})
+            stream_set_symbols()
+        elif t == 'error':
+            state['stream_status']['error'] = f"{m.get('code')}: {m.get('msg')}"
+            print(f'stream error: {m}')
+        elif t == 't':   # trade tick: {"T":"t","S":"AAPL","p":190.12,...}
+            sym, price = m.get('S'), m.get('p')
+            if not sym or price is None: continue
+            prev = state['prices'].get(sym, {})
+            state['prices'][sym] = {'price': round(float(price), 2), 'pct': prev.get('pct', 0)}
+            state['price_ts'] = time.time()
+            state['stream_status']['last_tick'] = time.time()
+            if any(tr['symbol'] == sym for tr in state['trades'].values()):
+                try: monitor_trades()
+                except Exception as e: print(f'monitor on tick: {e}')
+
+def _on_stream_error(wsapp, error):
+    state['stream_status'].update({'connected': False, 'authed': False, 'error': str(error)})
+
+def _on_stream_close(wsapp, *a):
+    global _stream_authed, _stream_subs
+    _stream_authed = False
+    _stream_subs = set()
+    state['stream_status'].update({'connected': False, 'authed': False})
+
+def start_stream():
+    """Open the Alpaca real-time trade stream in a background thread with
+    auto-reconnect. No-ops safely if Alpaca keys aren't configured."""
+    global _stream_ws
+    if not (ws_client and ALPACA_KEY and ALPACA_SECRET):
+        log('Realtime stream: no Alpaca keys set — using price polling instead')
+        return
+    url = f'wss://stream.data.alpaca.markets/v2/{ALPACA_DATA_FEED}'
+    def _run():
+        global _stream_ws
+        backoff = 2
+        while True:
+            try:
+                _stream_ws = ws_client.WebSocketApp(
+                    url, on_open=_on_stream_open, on_message=_on_stream_message,
+                    on_error=_on_stream_error, on_close=_on_stream_close)
+                _stream_ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as e:
+                print(f'stream loop: {e}')
+            state['stream_status']['connected'] = False
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+    threading.Thread(target=_run, daemon=True).start()
+    log(f'Realtime stream: connecting ({ALPACA_DATA_FEED} feed)…')
+
+# ══════════════════════════════════════════════════════════════════════
 # TRADES (simulated tracking)
 # ══════════════════════════════════════════════════════════════════════
 def open_count(mode):
     return sum(1 for t in state['trades'].values() if t['mode'] == mode)
 
+def deployed_value():
+    """Market value currently tied up in open positions (cost basis)."""
+    return sum(t.get('cost', t['entry'] * t['shares']) for t in state['trades'].values())
+
+def _reset_symbol_entries_if_new_day():
+    se = state['symbol_entries']
+    if se.get('date') != today():
+        se['date'] = today()
+        se['counts'] = {}
+
 def enter_trade(cand, manual=False):
     sym, mode = cand['symbol'], cand.get('mode', 'day')
-    limit = MAX_DAY_TRADES if mode == 'day' else MAX_SWING_TRADES
-    if open_count(mode) >= limit:
-        return False, f'Max {limit} {mode} positions open'
     if any(t['symbol'] == sym for t in state['trades'].values()):
         return False, f'Already holding {sym}'
-    # No re-entry same symbol same day after a loss
+
     if not manual:
+        # No re-entry same symbol same day after a loss (revenge-trade guard)
         for t in state['completed'][-30:]:
             if t['symbol'] == sym and t.get('exit_time', '').startswith(today()) and t.get('pnl', 0) <= 0:
                 return False, f'{sym} lost earlier today — skipping'
-    # Daily loss circuit-breaker
-    if not manual and state['daily_pnl'] <= -DAILY_LOSS_LIMIT * equity():
-        return False, 'Daily loss limit hit — auto-entries paused until tomorrow'
+        # Cooldown after ANY exit (win or loss) — stops rapid-fire re-entry into the same
+        # volatile name (e.g. entering/exiting VEEE nine times in 40 minutes)
+        last_exit = state['symbol_cooldown'].get(sym)
+        if last_exit and (time.time() - last_exit) < SYMBOL_COOLDOWN_SEC:
+            wait = int(SYMBOL_COOLDOWN_SEC - (time.time() - last_exit))
+            return False, f'{sym} on cooldown ({wait}s left)'
+        # Hard cap on repeat entries into one symbol per day, regardless of cooldown
+        _reset_symbol_entries_if_new_day()
+        if state['symbol_entries']['counts'].get(sym, 0) >= MAX_ENTRIES_PER_SYMBOL_DAY:
+            return False, f'{sym} already traded {MAX_ENTRIES_PER_SYMBOL_DAY}x today — skipping'
+        # Daily loss circuit-breaker
+        if state['daily_pnl'] <= -DAILY_LOSS_LIMIT * equity():
+            return False, 'Daily loss limit hit — auto-entries paused until tomorrow'
 
     price  = float(cand['entry'])
     stop   = float(cand['stop'])
@@ -510,10 +647,16 @@ def enter_trade(cand, manual=False):
     if price <= stop: return False, 'Bad stop'
 
     eq = equity()
+    # No hard count limit on concurrent positions — capital does the limiting instead
+    if deployed_value() >= eq * MAX_DEPLOYED_PCT:
+        return False, f'Deployed capital at {MAX_DEPLOYED_PCT*100:.0f}% cap — no new entries until something closes'
+
     risk_dollars = eq * RISK_PER_TRADE
     shares = risk_dollars / (price - stop)
     cap = eq * (DAY_POS_CAP if mode == 'day' else SWING_POS_CAP)
     shares = min(shares, cap / price)
+    room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
+    shares = min(shares, room / price)
     shares = round(shares, 4)
     cost = round(shares * price, 2)
     if shares <= 0 or cost > state['capital']:
@@ -530,7 +673,10 @@ def enter_trade(cand, manual=False):
         'reasons': cand.get('reasons', []),
     }
     state['capital'] = round(state['capital'] - cost, 2)
+    _reset_symbol_entries_if_new_day()
+    state['symbol_entries']['counts'][sym] = state['symbol_entries']['counts'].get(sym, 0) + 1
     save_state()
+    stream_set_symbols()
     rr = round((target - price) / (price - stop), 1)
     log(f"ENTER {mode.upper()} {sym} {shares}sh @${price:.2f}\n"
         f"Stop ${stop:.2f} | Target ${target:.2f} | R:R {rr}:1 | Risk ${shares*(price-stop):.2f}\n"
@@ -551,7 +697,9 @@ def close_trade(tid, reason):
     rec = {**t, 'exit_price': round(exit_price, 2), 'exit_reason': reason,
            'exit_time': now_str(), 'exit_date': today(), 'pnl': pnl, 'pnl_pct': pnl_pct}
     state['completed'].append(rec)
+    state['symbol_cooldown'][t['symbol']] = time.time()
     save_state()
+    stream_set_symbols()
     log(f"CLOSE {t['mode'].upper()} {t['symbol']} {label} ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
         f"${t['entry']:.2f} → ${exit_price:.2f} | Day P&L ${state['daily_pnl']:+.2f} | Equity ${equity():.2f}",
         alert=True)
@@ -598,10 +746,13 @@ def auto_entry():
     n = now_et(); mins = n.hour * 60 + n.minute
     if mins < 575: return                      # skip first 5 minutes
     scan = state['scan']
+    # No hard position-count limit — enter_trade() itself stops new entries once
+    # deployed capital hits MAX_DEPLOYED_PCT of equity, so we just offer every
+    # qualifying candidate and let the capital math do the gating.
     # DAY entries: 9:35–15:00, need intraday confirmation
     if mins <= 900:
         for c in scan.get('day', []):
-            if open_count('day') >= MAX_DAY_TRADES: break
+            if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
             if c['score'] < 60: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             tech = compute_technicals(c['symbol'])
@@ -615,7 +766,7 @@ def auto_entry():
     # SWING entries: 9:35–15:45, daily setup is enough
     if mins <= 945:
         for c in scan.get('swing', []):
-            if open_count('swing') >= MAX_SWING_TRADES: break
+            if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
             if c['score'] < 65: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             enter_trade(c)
@@ -672,7 +823,8 @@ def index(): return send_from_directory('.', 'index.html')
 @app.route('/ping')
 def ping():
     return _cors({'ok': True, 'time': now_str(), 'market': market_open(),
-                  'version': 'v5', 'tg': state['tg_status']})
+                  'version': 'v5', 'tg': state['tg_status'],
+                  'stream': state['stream_status']})
 
 @app.route('/scan')
 def scan_route():
@@ -692,7 +844,8 @@ def trades_route():
     return _cors({'trades': list(state['trades'].values()),
                   'capital': state['capital'], 'equity': equity(),
                   'daily_pnl': state['daily_pnl'],
-                  'limits': {'day': MAX_DAY_TRADES, 'swing': MAX_SWING_TRADES}})
+                  'limits': {'max_deployed_pct': MAX_DEPLOYED_PCT,
+                             'deployed_pct': round(deployed_value() / equity() * 100, 1) if equity() else 0}})
 
 @app.route('/performance')
 def performance():
@@ -870,6 +1023,7 @@ def _boot():
     try:
         refresh_prices()
         run_scan(announce=False)
+        start_stream()
     except Exception as e:
         print(f'boot scan: {e}')
 threading.Thread(target=_boot, daemon=True).start()
@@ -880,7 +1034,10 @@ if BackgroundScheduler:
         sched = BackgroundScheduler(timezone=ET)
         sched.add_job(job_premarket,     'cron', day_of_week='mon-fri', hour=8, minute=45)
         sched.add_job(job_premarket,     'cron', day_of_week='mon-fri', hour=9, minute=25)
-        sched.add_job(job_intraday_scan, 'cron', day_of_week='mon-fri', hour='10-15', minute='15,45')
+        # Full re-scan every 3 minutes during market hours — fully automatic,
+        # nobody needs to hit "Rescan". job_intraday_scan no-ops itself when
+        # the market's closed, so it's safe to schedule broadly.
+        sched.add_job(job_intraday_scan, 'interval', minutes=3, id='intraday_scan')
         sched.add_job(job_minute,        'cron', day_of_week='mon-fri', hour='9-16', minute='*')
         sched.add_job(job_eod,           'cron', day_of_week='mon-fri', hour=15, minute=56)
         sched.add_job(job_keepalive,     'interval', minutes=8)

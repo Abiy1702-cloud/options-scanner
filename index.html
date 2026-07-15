@@ -64,6 +64,7 @@ canvas{width:100%;height:170px;display:block}
   <header>
     <h1>Market <span>Scanner</span> Pro</h1>
     <span class="badge" id="mkt">market: …</span>
+    <span class="badge" id="feed">feed: …</span>
     <span class="badge" id="tgb">telegram: …</span>
     <span class="badge" id="uni">universe: …</span>
     <span style="flex:1"></span>
@@ -94,9 +95,9 @@ canvas{width:100%;height:170px;display:block}
 
     <div class="panel">
       <h2>📅 Day Trade Candidates
-        <span class="sub" id="scan-ts"></span>
+        <span class="sub" id="scan-ts">auto-scans every 3 min</span>
         <span style="flex:1"></span>
-        <button class="small" onclick="rescan()">🔄 Rescan</button>
+        <button class="small" onclick="rescan()">🔄 Rescan now</button>
       </h2>
       <div id="day-cands"><div class="empty">Scanning…</div></div>
     </div>
@@ -184,6 +185,11 @@ async function ping(){
     $('tgb').textContent = 'telegram: '+(tg.ok===true?'ok':(tg.ok===false?'ERROR':'untested'));
     $('tgb').className = 'badge'+(tg.ok===true?' on':'');
     $('tgb').title = tg.error||'';
+    const st = d.stream||{};
+    const fresh = st.last_tick && (Date.now()/1000 - st.last_tick) < 30;
+    $('feed').textContent = 'feed: '+(st.connected&&st.authed ? (fresh?'live':'connected') : 'polling');
+    $('feed').className = 'badge'+((st.connected&&st.authed)?' on':'');
+    $('feed').title = st.error ? st.error : (st.symbols?`streaming ${st.symbols} symbols`:'no Alpaca keys — using periodic polling');
   }catch(e){}
 }
 
@@ -216,7 +222,7 @@ async function loadScan(){
 async function rescan(){
   const d = await api('/rescan',{method:'POST',body:'{}'});
   toast(d.msg||(d.locked?'Enter PIN first':'…'));
-  setTimeout(loadScan, 35000);
+  setTimeout(loadScan, 20000);
 }
 
 // ── Positions ─────────────────────────────────────────────────────
@@ -362,10 +368,10 @@ function lineChart(id, ys, xs){
 
 // ── Boot / polling ────────────────────────────────────────────────
 ping(); loadScan(); loadTrades(); loadProgress();
-setInterval(ping, 60000);
-setInterval(loadScan, 90000);
-setInterval(loadTrades, 12000);
-setInterval(()=>{ if($('view-progress').style.display!=='none') loadProgress(); }, 30000);
+setInterval(ping, 20000);
+setInterval(loadScan, 20000);
+setInterval(loadTrades, 4000);
+setInterval(()=>{ if($('view-progress').style.display!=='none') loadProgress(); }, 15000);
 </script>
 </body>
 </html>
