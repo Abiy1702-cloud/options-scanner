@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: options-scanner-paper-agent
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 server:app
+    disk:
+      name: paper-agent-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PAPER_TRADING_ENABLED
+        value: "true"
+      - key: STARTING_CAPITAL
+        value: "1000"
+      - key: RISK_PER_TRADE
+        value: "0.005"
+      - key: DAILY_LOSS_LIMIT
+        value: "0.015"
+      - key: MAX_OPEN_POSITIONS
+        value: "3"
+      - key: MAX_TRADES_PER_DAY
+        value: "3"
+      - key: MAX_DEPLOYED_PCT
+        value: "0.45"
+      - key: STATE_FILE
+        value: /var/data/state.json
+      - key: JOURNAL_FILE
+        value: /var/data/trade_journal.jsonl

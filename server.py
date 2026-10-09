@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from datetime import datetime
 from flask import Flask, jsonify, send_from_directory, request
 import pytz
+from paper_agent import RiskEngine, RiskLimits
 
 try:
     import yfinance as yf
@@ -48,20 +49,28 @@ ET             = pytz.timezone('US/Eastern')
 UA             = 'MarketScannerPro/5.0'
 
 STARTING_CAPITAL = float(os.environ.get('STARTING_CAPITAL', 1000))
-RISK_PER_TRADE   = 0.01     # 1% of equity risked per trade
-DAY_POS_CAP      = 0.30     # max 30% of equity in one day trade
-SWING_POS_CAP    = 0.25     # max 25% of equity in one swing trade
-MIN_PRICE        = 2.0
+# Conservative defaults are intentional.  This service is a paper-trading
+# validation harness, not a promise of returns or a live order router.
+RISK_PER_TRADE   = float(os.environ.get('RISK_PER_TRADE', 0.005))
+DAY_POS_CAP      = float(os.environ.get('DAY_POS_CAP', 0.15))
+SWING_POS_CAP    = float(os.environ.get('SWING_POS_CAP', 0.12))
+MIN_PRICE        = float(os.environ.get('MIN_PRICE', 10.0))
 MAX_PRICE        = 2000.0
-MIN_DOLLAR_VOL   = 5e6      # $5M+ traded today = liquid enough
-DAILY_LOSS_LIMIT = 0.03     # stop auto-trading if down 3% on the day
+MIN_DOLLAR_VOL   = float(os.environ.get('MIN_DOLLAR_VOL', 20e6))
+DAILY_LOSS_LIMIT = float(os.environ.get('DAILY_LOSS_LIMIT', 0.015))
 SWING_MAX_DAYS   = 10       # trading days a swing may be held
 
 # ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
 # MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
-MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.90))  # never deploy more than 90% of equity across all open positions
+MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.45))
+MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 3))
+MAX_TRADES_PER_DAY   = int(os.environ.get('MAX_TRADES_PER_DAY', 3))
+MAX_DAILY_DRAWDOWN_R = float(os.environ.get('MAX_DAILY_DRAWDOWN_R', 3.0))
 SYMBOL_COOLDOWN_SEC  = int(os.environ.get('SYMBOL_COOLDOWN_SEC', 900))  # 15 min before re-entering a symbol just exited (win or loss) — stops VEEE-style churn
 MAX_ENTRIES_PER_SYMBOL_DAY = int(os.environ.get('MAX_ENTRIES_PER_SYMBOL_DAY', 2))  # hard cap on repeat entries into one symbol per day
+RISK_ENGINE = RiskEngine(RiskLimits(RISK_PER_TRADE, DAILY_LOSS_LIMIT,
+                                    MAX_OPEN_POSITIONS, MAX_TRADES_PER_DAY,
+                                    MAX_DEPLOYED_PCT))
 
 ALPACA_DATA_FEED = os.environ.get('ALPACA_DATA_FEED', 'iex')   # 'iex' = free real-time feed, 'sip' = paid full-tape feed
 # NOTE: this build is SIMULATED TRACKING ONLY — no live or paper orders are sent to
@@ -75,7 +84,8 @@ CORE = ['NVDA','TSLA','AMD','AAPL','MSFT','META','AMZN','GOOGL','PLTR','COIN',
 app = Flask(__name__, static_folder='.', static_url_path='')
 
 # ── State (persistent) ────────────────────────────────────────────────
-STATE_FILE = 'state.json'
+STATE_FILE = os.environ.get('STATE_FILE', 'state.json')
+JOURNAL_FILE = os.environ.get('JOURNAL_FILE', 'trade_journal.jsonl')
 state = {
     'capital': STARTING_CAPITAL,   # free cash
     'trades': {},                  # open positions (day + swing)
@@ -90,12 +100,28 @@ state = {
     'symbol_cooldown': {},          # {symbol: last_exit_epoch}
     'symbol_entries': {'date': '', 'counts': {}},  # entries per symbol today
     'stream_status': {'connected': False, 'authed': False, 'error': '', 'last_tick': 0, 'symbols': 0},
+    'risk': {'kill_switch': os.environ.get('PAPER_TRADING_ENABLED', 'true').lower() != 'true',
+             'kill_reason': '', 'entries_today': 0, 'realized_r_today': 0.0},
 }
 _lock = threading.Lock()
 
 def now_et():   return datetime.now(ET)
 def today():    return now_et().strftime('%Y-%m-%d')
 def now_str():  return now_et().strftime('%Y-%m-%d %H:%M ET')
+
+def journal(event, payload):
+    """Append-only audit trail. Do not use this file as a broker/order interface."""
+    row = {'event': event, 'at': now_str(), **payload}
+    try:
+        with open(JOURNAL_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(row, default=str) + '\\n')
+    except Exception as e:
+        print(f'journal: {e}')
+
+def disable_entries(reason):
+    state['risk'].update({'kill_switch': True, 'kill_reason': reason})
+    journal('kill_switch', {'reason': reason})
+    log(f'KILL SWITCH: {reason}', alert=True)
 
 def market_open():
     n = now_et(); t = n.hour * 60 + n.minute
@@ -112,6 +138,7 @@ def save_state():
                     'equity_history': state['equity_history'][-365:],
                     'daily_pnl': state['daily_pnl'],
                     'daily_date': state['daily_date'],
+                    'risk': state['risk'],
                 }, f)
     except Exception as e:
         print(f'save_state: {e}')
@@ -126,11 +153,17 @@ def load_state():
         state['equity_history'] = d.get('equity_history', [])
         state['daily_pnl']      = d.get('daily_pnl', 0.0)
         state['daily_date']     = d.get('daily_date', '')
+        state['risk'].update(d.get('risk', {}))
     except Exception:
         pass
     if state['daily_date'] != today():
         state['daily_date'] = today()
         state['daily_pnl']  = 0.0
+        state['risk']['entries_today'] = 0
+        state['risk']['realized_r_today'] = 0.0
+        # A daily circuit breaker resets only on the next trading day.
+        if state['risk'].get('kill_reason', '').startswith('daily'):
+            state['risk'].update({'kill_switch': False, 'kill_reason': ''})
 
 def equity():
     """Cash + market value of open positions."""
@@ -365,7 +398,12 @@ def deep_scan():
             if uptrend:  ds += 10; dr.append('uptrend')
             if breakout: ds += 10; dr.append('20d breakout')
             if dollar_vol > 5e7: ds += 5
-            if ds >= 35 and pct_today > 0.5:
+            # Avoid buying the first spike or a thin, parabolic mover.  The old
+            # scorer rewarded ever-larger gaps, which is a classic adverse
+            # selection problem in a small paper account.
+            day_tradeable = (3.0 <= pct_today <= 15.0 and 1.5 <= rvol <= 20.0
+                             and dollar_vol >= MIN_DOLLAR_VOL and price >= MIN_PRICE)
+            if ds >= 55 and day_tradeable:
                 stop   = round(max(price - 0.8 * atr, price * 0.975), 2)
                 risk   = price - stop
                 target = round(price + 2.0 * risk, 2)
@@ -385,7 +423,11 @@ def deep_scan():
             if pullback: ss += 10; sr.append('pullback to 20SMA')
             if rvol >= 2: ss += 8; sr.append(f'RVOL {rvol:.1f}x')
             if dollar_vol > 5e7: ss += 5
-            if ss >= 40:
+            # A swing should be a controlled continuation/pullback, not a stock
+            # already up 30% today or 70% in a week.
+            swing_tradeable = (pct_today <= 10.0 and chg5 <= 25.0 and
+                               dollar_vol >= MIN_DOLLAR_VOL and price >= MIN_PRICE)
+            if ss >= 55 and swing_tradeable:
                 stop   = round(max(price - 1.5 * atr, price * 0.93), 2)
                 risk   = price - stop
                 target = round(price + 2.5 * risk, 2)
@@ -619,8 +661,21 @@ def _reset_symbol_entries_if_new_day():
 
 def enter_trade(cand, manual=False):
     sym, mode = cand['symbol'], cand.get('mode', 'day')
+    if state['risk'].get('kill_switch'):
+        return False, f"Paper entry disabled: {state['risk'].get('kill_reason') or 'kill switch is on'}"
+    if not market_open():
+        return False, 'Market is closed — no simulated entries are created'
     if any(t['symbol'] == sym for t in state['trades'].values()):
         return False, f'Already holding {sym}'
+
+    _reset_symbol_entries_if_new_day()
+    if len(state['trades']) >= MAX_OPEN_POSITIONS:
+        return False, f'Maximum {MAX_OPEN_POSITIONS} concurrent positions reached'
+    if state['risk'].get('entries_today', 0) >= MAX_TRADES_PER_DAY:
+        return False, f'Maximum {MAX_TRADES_PER_DAY} entries today reached'
+    if state['daily_pnl'] <= -DAILY_LOSS_LIMIT * max(eq := equity(), STARTING_CAPITAL):
+        disable_entries('daily loss limit reached')
+        return False, 'Daily loss limit hit — entries disabled until tomorrow'
 
     if not manual:
         # No re-entry same symbol same day after a loss (revenge-trade guard)
@@ -634,12 +689,8 @@ def enter_trade(cand, manual=False):
             wait = int(SYMBOL_COOLDOWN_SEC - (time.time() - last_exit))
             return False, f'{sym} on cooldown ({wait}s left)'
         # Hard cap on repeat entries into one symbol per day, regardless of cooldown
-        _reset_symbol_entries_if_new_day()
         if state['symbol_entries']['counts'].get(sym, 0) >= MAX_ENTRIES_PER_SYMBOL_DAY:
             return False, f'{sym} already traded {MAX_ENTRIES_PER_SYMBOL_DAY}x today — skipping'
-        # Daily loss circuit-breaker
-        if state['daily_pnl'] <= -DAILY_LOSS_LIMIT * equity():
-            return False, 'Daily loss limit hit — auto-entries paused until tomorrow'
 
     price  = float(cand['entry'])
     stop   = float(cand['stop'])
@@ -647,12 +698,18 @@ def enter_trade(cand, manual=False):
     if price <= stop: return False, 'Bad stop'
 
     eq = equity()
-    # No hard count limit on concurrent positions — capital does the limiting instead
+    approved, decision, proposed_shares = RISK_ENGINE.assess(
+        kill_switch=state['risk'].get('kill_switch'), market_open=market_open(),
+        open_positions=len(state['trades']), entries_today=state['risk'].get('entries_today', 0),
+        daily_pnl=state['daily_pnl'], equity=eq, deployed_value=deployed_value(),
+        available_cash=state['capital'], entry=price, stop=stop)
+    if not approved:
+        return False, f'Risk engine: {decision}'
     if deployed_value() >= eq * MAX_DEPLOYED_PCT:
         return False, f'Deployed capital at {MAX_DEPLOYED_PCT*100:.0f}% cap — no new entries until something closes'
 
     risk_dollars = eq * RISK_PER_TRADE
-    shares = risk_dollars / (price - stop)
+    shares = min(risk_dollars / (price - stop), proposed_shares)
     cap = eq * (DAY_POS_CAP if mode == 'day' else SWING_POS_CAP)
     shares = min(shares, cap / price)
     room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
@@ -665,7 +722,8 @@ def enter_trade(cand, manual=False):
     tid = str(uuid.uuid4())[:8]
     state['trades'][tid] = {
         'id': tid, 'symbol': sym, 'mode': mode, 'entry': round(price, 2),
-        'shares': shares, 'cost': cost, 'stop': stop, 'target': target,
+        'instrument': 'underlying_equity_proxy', 'execution': 'simulated',
+        'shares': shares, 'cost': cost, 'initial_stop': stop, 'stop': stop, 'target': target,
         'current': round(price, 2), 'peak': round(price, 2),
         'pnl': 0.0, 'pnl_pct': 0.0,
         'entry_time': now_str(), 'entry_date': today(), 'entered_at': time.time(),
@@ -675,12 +733,14 @@ def enter_trade(cand, manual=False):
     state['capital'] = round(state['capital'] - cost, 2)
     _reset_symbol_entries_if_new_day()
     state['symbol_entries']['counts'][sym] = state['symbol_entries']['counts'].get(sym, 0) + 1
+    state['risk']['entries_today'] = state['risk'].get('entries_today', 0) + 1
     save_state()
     stream_set_symbols()
     rr = round((target - price) / (price - stop), 1)
     log(f"ENTER {mode.upper()} {sym} {shares}sh @${price:.2f}\n"
         f"Stop ${stop:.2f} | Target ${target:.2f} | R:R {rr}:1 | Risk ${shares*(price-stop):.2f}\n"
         f"Why: {', '.join(cand.get('reasons', [])[:3])}", alert=True)
+    journal('entry', state['trades'][tid])
     return True, f'Entered {sym} ({mode})'
 
 def close_trade(tid, reason):
@@ -697,12 +757,17 @@ def close_trade(tid, reason):
     rec = {**t, 'exit_price': round(exit_price, 2), 'exit_reason': reason,
            'exit_time': now_str(), 'exit_date': today(), 'pnl': pnl, 'pnl_pct': pnl_pct}
     state['completed'].append(rec)
+    initial_risk = max((t['entry'] - t.get('initial_stop', t['stop'])) * t['shares'], 0.01)
+    state['risk']['realized_r_today'] = round(state['risk'].get('realized_r_today', 0.0) + pnl / initial_risk, 2)
     state['symbol_cooldown'][t['symbol']] = time.time()
     save_state()
     stream_set_symbols()
     log(f"CLOSE {t['mode'].upper()} {t['symbol']} {label} ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
         f"${t['entry']:.2f} → ${exit_price:.2f} | Day P&L ${state['daily_pnl']:+.2f} | Equity ${equity():.2f}",
         alert=True)
+    journal('exit', rec)
+    if state['risk']['realized_r_today'] <= -MAX_DAILY_DRAWDOWN_R:
+        disable_entries(f'daily R-loss limit ({MAX_DAILY_DRAWDOWN_R:.1f}R) reached')
 
 def monitor_trades():
     if not state['trades']: return
@@ -742,7 +807,7 @@ def monitor_trades():
 
 def auto_entry():
     """Enter top-scored candidates automatically during market hours."""
-    if not market_open(): return
+    if not market_open() or state['risk'].get('kill_switch'): return
     n = now_et(); mins = n.hour * 60 + n.minute
     if mins < 575: return                      # skip first 5 minutes
     scan = state['scan']
@@ -753,7 +818,7 @@ def auto_entry():
     if mins <= 900:
         for c in scan.get('day', []):
             if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
-            if c['score'] < 60: continue
+            if c['score'] < 75: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             tech = compute_technicals(c['symbol'])
             if not tech or tech['signal'] != 'BUY': continue
@@ -767,7 +832,7 @@ def auto_entry():
     if mins <= 945:
         for c in scan.get('swing', []):
             if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
-            if c['score'] < 65: continue
+            if c['score'] < 70: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             enter_trade(c)
 
@@ -804,7 +869,7 @@ def _cors(data, status=200):
     r.status_code = status
     return r
 
-PUBLIC = {'/', '/ping', '/scan', '/trades', '/performance', '/logs',
+PUBLIC = {'/', '/ping', '/scan', '/trades', '/performance', '/logs', '/risk',
           '/candles', '/technicals', '/analysis-result', '/prices'}
 
 @app.before_request
@@ -823,8 +888,25 @@ def index(): return send_from_directory('.', 'index.html')
 @app.route('/ping')
 def ping():
     return _cors({'ok': True, 'time': now_str(), 'market': market_open(),
-                  'version': 'v5', 'tg': state['tg_status'],
+                  'version': 'v6-paper-agent', 'mode': 'PAPER_ONLY', 'tg': state['tg_status'],
                   'stream': state['stream_status']})
+
+@app.route('/risk')
+def risk_route():
+    return _cors({'mode': 'PAPER_ONLY', 'risk': state['risk'],
+                  'limits': {'risk_per_trade_pct': RISK_PER_TRADE * 100,
+                             'daily_loss_limit_pct': DAILY_LOSS_LIMIT * 100,
+                             'max_open_positions': MAX_OPEN_POSITIONS,
+                             'max_trades_per_day': MAX_TRADES_PER_DAY,
+                             'max_deployed_pct': MAX_DEPLOYED_PCT * 100}})
+
+@app.route('/kill-switch', methods=['POST'])
+def kill_switch_route():
+    enabled = bool((request.get_json(silent=True) or {}).get('enabled', True))
+    state['risk']['kill_switch'] = enabled
+    state['risk']['kill_reason'] = 'operator disabled entries' if enabled else ''
+    save_state(); journal('kill_switch', {'enabled': enabled, 'reason': state['risk']['kill_reason']})
+    return _cors({'ok': True, 'risk': state['risk']})
 
 @app.route('/scan')
 def scan_route():
@@ -975,6 +1057,10 @@ def telegram_test():
 def job_premarket():
     if now_et().weekday() >= 5: return
     state['daily_date'] = today(); state['daily_pnl'] = 0.0
+    state['risk']['entries_today'] = 0
+    state['risk']['realized_r_today'] = 0.0
+    if state['risk'].get('kill_reason', '').startswith('daily'):
+        state['risk'].update({'kill_switch': False, 'kill_reason': ''})
     save_state()
     run_scan(announce=True)
 
@@ -986,6 +1072,10 @@ def job_minute():
     if now_et().weekday() >= 5: return
     if state['daily_date'] != today():
         state['daily_date'] = today(); state['daily_pnl'] = 0.0
+        state['risk']['entries_today'] = 0
+        state['risk']['realized_r_today'] = 0.0
+        if state['risk'].get('kill_reason', '').startswith('daily'):
+            state['risk'].update({'kill_switch': False, 'kill_reason': ''})
     if market_open():
         refresh_prices()
         monitor_trades()

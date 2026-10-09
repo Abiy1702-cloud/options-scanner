@@ -69,6 +69,7 @@ canvas{width:100%;height:170px;display:block}
     <span class="badge" id="uni">universe: …</span>
     <span style="flex:1"></span>
     <input type="password" id="pin" placeholder="PIN" title="PIN for actions">
+    <button class="small danger" id="kill-btn" onclick="toggleKill()">Stop entries</button>
   </header>
 
   <div class="warn">Simulated tracking for learning &amp; discipline — picks are candidates to evaluate, not guaranteed winners. Trade real money only with what you can afford to lose.</div>
@@ -191,6 +192,21 @@ async function ping(){
     $('feed').className = 'badge'+((st.connected&&st.authed)?' on':'');
     $('feed').title = st.error ? st.error : (st.symbols?`streaming ${st.symbols} symbols`:'no Alpaca keys — using periodic polling');
   }catch(e){}
+}
+async function loadRisk(){
+  try{
+    const d=await api('/risk'), r=d.risk||{}, b=$('kill-btn');
+    b.textContent=r.kill_switch?'Entries stopped — resume':'Stop entries';
+    b.className=r.kill_switch?'small':'small danger';
+    b.title=`Paper-only | ${r.kill_reason||'risk engine active'}`;
+  }catch(e){}
+}
+async function toggleKill(){
+  const r=await api('/risk'), stopped=!!(r.risk||{}).kill_switch;
+  if(!confirm(stopped?'Resume new simulated entries?':'Stop all new simulated entries? Open positions will still be monitored.'))return;
+  const d=await api('/kill-switch',{method:'POST',body:JSON.stringify({enabled:!stopped})});
+  toast(d.ok?(d.risk.kill_switch?'New paper entries stopped':'New paper entries resumed'):(d.msg||'Enter PIN first'));
+  loadRisk();
 }
 
 // ── Scan candidates ───────────────────────────────────────────────
@@ -367,8 +383,9 @@ function lineChart(id, ys, xs){
 }
 
 // ── Boot / polling ────────────────────────────────────────────────
-ping(); loadScan(); loadTrades(); loadProgress();
+ping(); loadScan(); loadTrades(); loadProgress(); loadRisk();
 setInterval(ping, 20000);
+setInterval(loadRisk, 20000);
 setInterval(loadScan, 20000);
 setInterval(loadTrades, 4000);
 setInterval(()=>{ if($('view-progress').style.display!=='none') loadProgress(); }, 15000);
