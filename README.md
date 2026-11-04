@@ -8,11 +8,14 @@ greeks, spreads, assignment, or early exercise.
 
 ## What changed in v6
 
-- Entry selection rejects low-priced, thin, and parabolic momentum candidates.
-- Risk is 0.5% of equity per entry by default, with 12–15% per-position caps.
-- The agent allows at most 3 open positions, 3 new entries/day, and 45% total
-  deployed capital.
-- A 1.5% daily loss limit and a 3R daily limit disable new entries.
+- Entry selection rejects low-priced, thin, and parabolic momentum candidates,
+  while treating incomplete daily volume as a score input rather than an
+  intraday hard gate.
+- Risk is 0.75% of equity per entry by default, with 18–20% per-position caps.
+- The agent allows at most 5 open positions and 65% total deployed capital.
+  Daily entries are not arbitrarily capped; duplicate-position, re-entry,
+  capital, and loss controls still apply.
+- A 2.5% daily loss limit and a 3R daily limit disable new entries.
 - `POST /kill-switch` (PIN protected) disables all new paper entries. Existing
   simulated positions keep being monitored and can be closed manually.
 - Each entry, exit, and kill-switch action is recorded in `trade_journal.jsonl`.

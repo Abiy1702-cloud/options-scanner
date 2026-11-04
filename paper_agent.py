@@ -34,7 +34,8 @@ class RiskEngine:
         if kill_switch: return False, 'kill switch is on', 0.0
         if not market_open: return False, 'market is closed', 0.0
         if open_positions >= self.limits.max_open_positions: return False, 'maximum concurrent positions reached', 0.0
-        if entries_today >= self.limits.max_entries_per_day: return False, 'maximum daily entries reached', 0.0
+        if self.limits.max_entries_per_day > 0 and entries_today >= self.limits.max_entries_per_day:
+            return False, 'maximum daily entries reached', 0.0
         if daily_pnl <= -self.limits.daily_loss_limit * max(equity, 1): return False, 'daily loss limit reached', 0.0
         if entry <= stop: return False, 'invalid stop', 0.0
         if deployed_value >= equity * self.limits.max_deployed_pct: return False, 'capital deployment cap reached', 0.0

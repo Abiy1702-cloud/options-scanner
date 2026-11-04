@@ -14,15 +14,15 @@ services:
       - key: STARTING_CAPITAL
         value: "1000"
       - key: RISK_PER_TRADE
-        value: "0.005"
+        value: "0.0075"
       - key: DAILY_LOSS_LIMIT
-        value: "0.015"
+        value: "0.025"
       - key: MAX_OPEN_POSITIONS
-        value: "3"
+        value: "5"
       - key: MAX_TRADES_PER_DAY
-        value: "3"
+        value: "0"
       - key: MAX_DEPLOYED_PCT
-        value: "0.45"
+        value: "0.65"
       - key: STATE_FILE
         value: /var/data/state.json
       - key: JOURNAL_FILE

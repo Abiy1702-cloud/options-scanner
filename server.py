@@ -51,20 +51,22 @@ UA             = 'MarketScannerPro/5.0'
 STARTING_CAPITAL = float(os.environ.get('STARTING_CAPITAL', 1000))
 # Conservative defaults are intentional.  This service is a paper-trading
 # validation harness, not a promise of returns or a live order router.
-RISK_PER_TRADE   = float(os.environ.get('RISK_PER_TRADE', 0.005))
-DAY_POS_CAP      = float(os.environ.get('DAY_POS_CAP', 0.15))
-SWING_POS_CAP    = float(os.environ.get('SWING_POS_CAP', 0.12))
+RISK_PER_TRADE   = float(os.environ.get('RISK_PER_TRADE', 0.0075))
+DAY_POS_CAP      = float(os.environ.get('DAY_POS_CAP', 0.20))
+SWING_POS_CAP    = float(os.environ.get('SWING_POS_CAP', 0.18))
 MIN_PRICE        = float(os.environ.get('MIN_PRICE', 10.0))
 MAX_PRICE        = 2000.0
 MIN_DOLLAR_VOL   = float(os.environ.get('MIN_DOLLAR_VOL', 20e6))
-DAILY_LOSS_LIMIT = float(os.environ.get('DAILY_LOSS_LIMIT', 0.015))
+DAILY_LOSS_LIMIT = float(os.environ.get('DAILY_LOSS_LIMIT', 0.025))
 SWING_MAX_DAYS   = 10       # trading days a swing may be held
 
 # ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
 # MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
-MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.45))
-MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 3))
-MAX_TRADES_PER_DAY   = int(os.environ.get('MAX_TRADES_PER_DAY', 3))
+MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.65))
+MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 5))
+# Zero means no arbitrary daily-entry count. Capital, per-trade risk, loss
+# circuit breaker, cool-down, and duplicate-position controls still apply.
+MAX_TRADES_PER_DAY   = int(os.environ.get('MAX_TRADES_PER_DAY', 0))
 MAX_DAILY_DRAWDOWN_R = float(os.environ.get('MAX_DAILY_DRAWDOWN_R', 3.0))
 SYMBOL_COOLDOWN_SEC  = int(os.environ.get('SYMBOL_COOLDOWN_SEC', 900))  # 15 min before re-entering a symbol just exited (win or loss) — stops VEEE-style churn
 MAX_ENTRIES_PER_SYMBOL_DAY = int(os.environ.get('MAX_ENTRIES_PER_SYMBOL_DAY', 2))  # hard cap on repeat entries into one symbol per day
@@ -94,7 +96,7 @@ state = {
     'logs': [],
     'daily_pnl': 0.0,
     'daily_date': '',
-    'scan': {'day': [], 'swing': [], 'ts': 0, 'universe': 0},
+    'scan': {'day': [], 'swing': [], 'ts': 0, 'universe': 0, 'diagnostics': {}},
     'prices': {}, 'price_ts': 0,
     'tg_status': {'ok': None, 'error': 'not tested yet', 't': ''},
     'symbol_cooldown': {},          # {symbol: last_exit_epoch}
@@ -309,11 +311,14 @@ def gather_universe():
 def deep_scan():
     """Full pipeline: gather universe → filter → score day & swing setups."""
     if not yf or pd is None:
-        return [], [], 0
+        return [], [], 0, {'error': 'yfinance or pandas unavailable'}
     cands = gather_universe()
     universe_n = len(cands)
     if not cands:
-        return [], [], 0
+        return [], [], 0, {'error': 'no universe symbols'}
+    diag = {'universe': universe_n, 'selected': 0, 'evaluated': 0,
+            'low_dollar_volume': 0, 'day_score_pass': 0, 'day_filter_pass': 0,
+            'swing_score_pass': 0, 'swing_filter_pass': 0}
 
     # Rank raw candidates by % change; deep-scan top 45 + all core
     ranked = sorted(cands.items(), key=lambda kv: kv[1]['pct'] or 0, reverse=True)
@@ -321,6 +326,7 @@ def deep_scan():
     for s in CORE:
         if s not in syms: syms.append(s)
     syms = syms[:70]
+    diag['selected'] = len(syms)
 
     day_list, swing_list = [], []
     try:
@@ -328,7 +334,7 @@ def deep_scan():
                          progress=False, group_by='ticker', threads=True)
     except Exception as e:
         print(f'deep_scan download: {e}')
-        return [], [], universe_n
+        return [], [], universe_n, {**diag, 'error': f'download: {type(e).__name__}'}
 
     multi = isinstance(df.columns, pd.MultiIndex)
     for sym in syms:
@@ -338,6 +344,7 @@ def deep_scan():
             else:
                 sub = df.dropna()
             if len(sub) < 30: continue
+            diag['evaluated'] += 1
             c = sub['Close'].values.astype(float)
             h = sub['High'].values.astype(float)
             l = sub['Low'].values.astype(float)
@@ -356,7 +363,9 @@ def deep_scan():
             if live.get('price'): price = float(live['price'])
 
             dollar_vol = float(v[-1]) * price
-            if dollar_vol < MIN_DOLLAR_VOL: continue
+            if dollar_vol < MIN_DOLLAR_VOL:
+                diag['low_dollar_volume'] += 1
+                continue
 
             avg_vol = float(v[-21:-1].mean()) if len(v) >= 21 else float(v.mean())
             rvol = float(v[-1]) / avg_vol if avg_vol > 0 else 1.0
@@ -401,9 +410,14 @@ def deep_scan():
             # Avoid buying the first spike or a thin, parabolic mover.  The old
             # scorer rewarded ever-larger gaps, which is a classic adverse
             # selection problem in a small paper account.
-            day_tradeable = (3.0 <= pct_today <= 15.0 and 1.5 <= rvol <= 20.0
+            # Daily volume is incomplete during the session, so its ratio is a
+            # weak intraday gate.  Use it as a score feature, then require a
+            # separate live 5-minute VWAP/EMA confirmation before entering.
+            if ds >= 30: diag['day_score_pass'] += 1
+            day_tradeable = (0.5 <= pct_today <= 12.0 and 0.35 <= rvol <= 30.0
                              and dollar_vol >= MIN_DOLLAR_VOL and price >= MIN_PRICE)
-            if ds >= 55 and day_tradeable:
+            if ds >= 30 and day_tradeable:
+                diag['day_filter_pass'] += 1
                 stop   = round(max(price - 0.8 * atr, price * 0.975), 2)
                 risk   = price - stop
                 target = round(price + 2.0 * risk, 2)
@@ -425,9 +439,11 @@ def deep_scan():
             if dollar_vol > 5e7: ss += 5
             # A swing should be a controlled continuation/pullback, not a stock
             # already up 30% today or 70% in a week.
+            if ss >= 35: diag['swing_score_pass'] += 1
             swing_tradeable = (pct_today <= 10.0 and chg5 <= 25.0 and
                                dollar_vol >= MIN_DOLLAR_VOL and price >= MIN_PRICE)
-            if ss >= 55 and swing_tradeable:
+            if ss >= 35 and swing_tradeable:
+                diag['swing_filter_pass'] += 1
                 stop   = round(max(price - 1.5 * atr, price * 0.93), 2)
                 risk   = price - stop
                 target = round(price + 2.5 * risk, 2)
@@ -438,13 +454,14 @@ def deep_scan():
 
     day_list.sort(key=lambda x: x['score'], reverse=True)
     swing_list.sort(key=lambda x: x['score'], reverse=True)
-    return day_list[:12], swing_list[:12], universe_n
+    return day_list[:12], swing_list[:12], universe_n, diag
 
 def run_scan(announce=False):
-    day, swing, n = deep_scan()
-    state['scan'] = {'day': day, 'swing': swing, 'ts': time.time(), 'universe': n}
+    day, swing, n, diag = deep_scan()
+    state['scan'] = {'day': day, 'swing': swing, 'ts': time.time(), 'universe': n,
+                     'diagnostics': diag}
     stream_set_symbols()
-    log(f'Scan done: universe {n} → {len(day)} day / {len(swing)} swing candidates')
+    log(f'Scan done: universe {n} → {len(day)} day / {len(swing)} swing candidates | {diag}')
     if announce and (day or swing):
         msg = f'🔎 Scan {now_str()} — universe {n} stocks\n'
         if day:
@@ -489,7 +506,10 @@ def compute_technicals(sym):
 
         above_vwap = price > vwap
         bull = sum([above_vwap, ema9 > ema20, macd_bull, 35 < rsi < 70])
-        signal = 'BUY' if (bull >= 3 and above_vwap and rsi < 70) else \
+        # Keep price above VWAP as the non-negotiable intraday confirmation,
+        # but allow a developing trend (two confirming inputs) instead of only
+        # the most mature three-of-four setup.
+        signal = 'BUY' if (bull >= 2 and above_vwap and rsi < 75) else \
                  ('SELL' if (bull <= 1 or rsi > 78) else 'WAIT')
         return {'signal': signal, 'price': round(price, 2), 'vwap': round(vwap, 2),
                 'ema9': round(ema9, 2), 'ema20': round(ema20, 2), 'rsi': round(rsi, 1),
@@ -671,7 +691,7 @@ def enter_trade(cand, manual=False):
     _reset_symbol_entries_if_new_day()
     if len(state['trades']) >= MAX_OPEN_POSITIONS:
         return False, f'Maximum {MAX_OPEN_POSITIONS} concurrent positions reached'
-    if state['risk'].get('entries_today', 0) >= MAX_TRADES_PER_DAY:
+    if MAX_TRADES_PER_DAY > 0 and state['risk'].get('entries_today', 0) >= MAX_TRADES_PER_DAY:
         return False, f'Maximum {MAX_TRADES_PER_DAY} entries today reached'
     if state['daily_pnl'] <= -DAILY_LOSS_LIMIT * max(eq := equity(), STARTING_CAPITAL):
         disable_entries('daily loss limit reached')
@@ -818,7 +838,7 @@ def auto_entry():
     if mins <= 900:
         for c in scan.get('day', []):
             if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
-            if c['score'] < 75: continue
+            if c['score'] < 35: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             tech = compute_technicals(c['symbol'])
             if not tech or tech['signal'] != 'BUY': continue
@@ -832,7 +852,7 @@ def auto_entry():
     if mins <= 945:
         for c in scan.get('swing', []):
             if deployed_value() >= equity() * MAX_DEPLOYED_PCT: break
-            if c['score'] < 70: continue
+            if c['score'] < 40: continue
             if any(t['symbol'] == c['symbol'] for t in state['trades'].values()): continue
             enter_trade(c)
 
@@ -897,7 +917,7 @@ def risk_route():
                   'limits': {'risk_per_trade_pct': RISK_PER_TRADE * 100,
                              'daily_loss_limit_pct': DAILY_LOSS_LIMIT * 100,
                              'max_open_positions': MAX_OPEN_POSITIONS,
-                             'max_trades_per_day': MAX_TRADES_PER_DAY,
+                             'max_trades_per_day': 'unlimited' if MAX_TRADES_PER_DAY == 0 else MAX_TRADES_PER_DAY,
                              'max_deployed_pct': MAX_DEPLOYED_PCT * 100}})
 
 @app.route('/kill-switch', methods=['POST'])
