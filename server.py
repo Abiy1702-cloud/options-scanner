@@ -62,7 +62,7 @@ SWING_MAX_DAYS   = 10       # trading days a swing may be held
 
 # ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
 # MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
-MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.65))
+MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.90))
 MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 5))
 # Zero means no arbitrary daily-entry count. Capital, per-trade risk, loss
 # circuit breaker, cool-down, and duplicate-position controls still apply.

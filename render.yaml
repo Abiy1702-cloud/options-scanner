@@ -22,7 +22,7 @@ services:
       - key: MAX_TRADES_PER_DAY
         value: "0"
       - key: MAX_DEPLOYED_PCT
-        value: "0.65"
+        value: "0.90"
       - key: STATE_FILE
         value: /var/data/state.json
       - key: JOURNAL_FILE

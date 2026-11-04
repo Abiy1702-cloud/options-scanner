@@ -12,7 +12,7 @@ greeks, spreads, assignment, or early exercise.
   while treating incomplete daily volume as a score input rather than an
   intraday hard gate.
 - Risk is 0.75% of equity per entry by default, with 18–20% per-position caps.
-- The agent allows at most 5 open positions and 65% total deployed capital.
+- The agent allows at most 5 open positions and 90% total deployed capital.
   Daily entries are not arbitrarily capped; duplicate-position, re-entry,
   capital, and loss controls still apply.
 - A 2.5% daily loss limit and a 3R daily limit disable new entries.
