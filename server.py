@@ -13,7 +13,7 @@ Market Scanner Pro v5 — full rebuild
 
 import os, json, time, uuid, threading, urllib.request, urllib.error
 from urllib.parse import urlencode
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify, send_from_directory, request
 import pytz
 from paper_agent import RiskEngine, RiskLimits
@@ -102,6 +102,7 @@ state = {
     'symbol_cooldown': {},          # {symbol: last_exit_epoch}
     'symbol_entries': {'date': '', 'counts': {}},  # entries per symbol today
     'stream_status': {'connected': False, 'authed': False, 'error': '', 'last_tick': 0, 'symbols': 0},
+    'option_cache': {},
     'risk': {'kill_switch': os.environ.get('PAPER_TRADING_ENABLED', 'true').lower() != 'true',
              'kill_reason': '', 'entries_today': 0, 'realized_r_today': 0.0},
 }
@@ -212,7 +213,7 @@ def log(msg, alert=False):
     state['logs'].insert(0, {'t': now_str(), 'msg': str(msg)})
     state['logs'] = state['logs'][:300]
     print(msg)
-    if alert:
+    if alert and TELEGRAM_TOKEN and TELEGRAM_CHAT:
         ok, detail = tg(f'📡 Scanner\n{msg}')
         if not ok:
             state['logs'].insert(0, {'t': now_str(), 'msg': f'⚠️ Telegram failed: {detail}'})
@@ -259,6 +260,77 @@ def _alpaca_get(path, params=None):
     except Exception as e:
         print(f'alpaca {path}: {e}')
         return None
+
+def _alpaca_trading_get(path, params=None):
+    """Read-only Trading API access for real option-contract metadata only."""
+    if not ALPACA_KEY or not ALPACA_SECRET: return None
+    try:
+        base = os.environ.get('ALPACA_TRADING_BASE_URL', 'https://paper-api.alpaca.markets')
+        url = f'{base}{path}'
+        if params: url += '?' + urlencode(params)
+        req = urllib.request.Request(url, headers={
+            'APCA-API-KEY-ID': ALPACA_KEY, 'APCA-API-SECRET-KEY': ALPACA_SECRET,
+            'User-Agent': UA})
+        return json.loads(urllib.request.urlopen(req, timeout=12).read())
+    except Exception as e:
+        print(f'alpaca trading {path}: {e}')
+        return None
+
+def real_call_candidate(cand):
+    """Return a real, active Alpaca call contract closest to the intended strike.
+
+    This is display-only contract research. The simulator continues to trade
+    underlying shares and never submits an options order.
+    """
+    sym, mode, price = cand['symbol'], cand.get('mode', 'day'), float(cand['price'])
+    cache_key = f'{sym}:{mode}'
+    cached = state['option_cache'].get(cache_key)
+    if cached and time.time() - cached['ts'] < 900:
+        return cached['value']
+
+    dte_min, dte_max = (7, 21) if mode == 'day' else (21, 60)
+    params = {
+        'underlying_symbols': sym, 'type': 'call', 'status': 'active',
+        'expiration_date_gte': (now_et().date() + timedelta(days=dte_min)).isoformat(),
+        'expiration_date_lte': (now_et().date() + timedelta(days=dte_max)).isoformat(),
+        'strike_price_gte': round(price * 0.95, 2),
+        'strike_price_lte': round(price * 1.08, 2), 'limit': 500,
+    }
+    data = _alpaca_trading_get('/v2/options/contracts', params)
+    contracts = (data or {}).get('option_contracts', [])
+    eligible = []
+    for contract in contracts:
+        try:
+            expiry = datetime.strptime(contract['expiration_date'], '%Y-%m-%d').date()
+            if not contract.get('tradable') or contract.get('status') != 'active': continue
+            eligible.append((contract, (expiry - now_et().date()).days,
+                             float(contract['strike_price'])))
+        except Exception:
+            continue
+    if not eligible:
+        value = {'available': False, 'message': 'No eligible Alpaca call in selected DTE/strike range'}
+    else:
+        desired_strike = price * (1.01 if mode == 'day' else 1.03)
+        def option_rank(item):
+            try: oi = int(item[0].get('open_interest') or 0)
+            except (TypeError, ValueError): oi = 0
+            return (abs(item[2] - desired_strike), item[1], -oi)
+        contract, dte, strike = min(eligible, key=option_rank)
+        value = {'available': True, 'source': 'alpaca_contracts',
+                 'symbol': contract.get('symbol'), 'name': contract.get('name'),
+                 'expiry': contract.get('expiration_date'), 'dte': dte,
+                 'strike': strike, 'open_interest': contract.get('open_interest'),
+                 'tradable': bool(contract.get('tradable'))}
+    state['option_cache'][cache_key] = {'ts': time.time(), 'value': value}
+    return value
+
+def enrich_with_real_calls(candidates):
+    # Limit contract lookups to the candidates shown to the user and cache them.
+    stats = {'requested': min(len(candidates), 6), 'available': 0}
+    for cand in candidates[:6]:
+        cand['call_candidate'] = real_call_candidate(cand)
+        if cand['call_candidate'].get('available'): stats['available'] += 1
+    return stats
 
 def _clean_symbol(s):
     s = (s or '').upper().strip()
@@ -422,7 +494,8 @@ def deep_scan():
                 risk   = price - stop
                 target = round(price + 2.0 * risk, 2)
                 day_list.append({**base, 'mode': 'day', 'score': ds, 'reasons': dr,
-                                 'entry': round(price, 2), 'stop': stop, 'target': target})
+                                 'entry': round(price, 2), 'stop': stop, 'target': target,
+                                 'risk_per_share': round(risk, 2), 'reward_r': 2.0})
 
             # ── SWING score ──────────────────────────────────────────
             ss, sr = 0, []
@@ -448,7 +521,8 @@ def deep_scan():
                 risk   = price - stop
                 target = round(price + 2.5 * risk, 2)
                 swing_list.append({**base, 'mode': 'swing', 'score': ss, 'reasons': sr,
-                                   'entry': round(price, 2), 'stop': stop, 'target': target})
+                                   'entry': round(price, 2), 'stop': stop, 'target': target,
+                                   'risk_per_share': round(risk, 2), 'reward_r': 2.5})
         except Exception:
             continue
 
@@ -458,6 +532,8 @@ def deep_scan():
 
 def run_scan(announce=False):
     day, swing, n, diag = deep_scan()
+    diag['day_call_contracts'] = enrich_with_real_calls(day)
+    diag['swing_call_contracts'] = enrich_with_real_calls(swing)
     state['scan'] = {'day': day, 'swing': swing, 'ts': time.time(), 'universe': n,
                      'diagnostics': diag}
     stream_set_symbols()

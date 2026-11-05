@@ -20,6 +20,9 @@ greeks, spreads, assignment, or early exercise.
   simulated positions keep being monitored and can be closed manually.
 - Each entry, exit, and kill-switch action is recorded in `trade_journal.jsonl`.
 - `GET /risk` exposes the mode, current breaker state, and enforced limits.
+- Candidate rows include a real, active Alpaca call contract when one is
+  available in the selected strike and expiry window. This is read-only research
+  data; the service does not paper-trade or submit option orders.
 
 ## Render setup
 

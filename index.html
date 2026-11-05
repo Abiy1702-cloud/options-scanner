@@ -97,8 +97,6 @@ canvas{width:100%;height:170px;display:block}
     <div class="panel">
       <h2>📅 Day Trade Candidates
         <span class="sub" id="scan-ts">auto-scans every 3 min</span>
-        <span style="flex:1"></span>
-        <button class="small" onclick="rescan()">🔄 Rescan now</button>
       </h2>
       <div id="day-cands"><div class="empty">Scanning…</div></div>
     </div>
@@ -109,13 +107,8 @@ canvas{width:100%;height:170px;display:block}
     </div>
 
     <div class="panel">
-      <h2>🔍 Analyze Any Symbol</h2>
-      <div class="row">
-        <input type="text" id="an-sym" placeholder="e.g. NVDA" style="text-transform:uppercase">
-        <button onclick="analyze()">Analyze</button>
-        <button class="ghost" onclick="tgTest()">📨 Test Telegram</button>
-      </div>
-      <div id="an-out"></div>
+      <h2>🔎 Scanner Health</h2>
+      <div id="scan-health" class="empty">Waiting for scan diagnostics…</div>
     </div>
   </div>
 
@@ -211,18 +204,25 @@ async function toggleKill(){
 
 // ── Scan candidates ───────────────────────────────────────────────
 function scoreCls(s){return s>=65?'s-hi':(s>=50?'s-md':'s-lo');}
+function callInfo(c){
+  const o=c.call_candidate;
+  if(!o) return '<span class="sub">Loading contract…</span>';
+  if(!o.available) return '<span class="sub">No eligible call</span>';
+  const oi=o.open_interest!=null?` · OI ${o.open_interest}`:'';
+  return `<b>${o.symbol}</b><div class="reasons">Call · $${o.strike} · ${o.expiry} (${o.dte}DTE)${oi}</div>`;
+}
 function candTable(list, mode){
-  if(!list||!list.length) return '<div class="empty">No candidates right now — market may be quiet or scan still running. Try 🔄 Rescan.</div>';
+  if(!list||!list.length) return '<div class="empty">No candidates right now — the automated scan refreshes every 3 minutes during market hours.</div>';
   let h = `<table><tr><th>Symbol</th><th>Price</th><th>Today</th><th>RVOL</th><th>Score</th>
-           <th>Entry / Stop / Target</th><th></th></tr>`;
+           <th>Entry / Stop / Target</th><th>Real Call Research</th></tr>`;
   for(const c of list){
     h += `<tr><td><span class="sym">${c.symbol}</span><div class="reasons">${(c.reasons||[]).join(' · ')}</div></td>
       <td>$${c.price}</td>
       <td class="${cls(c.pct_today)}">${c.pct_today>0?'+':''}${c.pct_today}%</td>
       <td>${c.rvol}x</td>
       <td><span class="score ${scoreCls(c.score)}">${c.score}</span></td>
-      <td style="font-size:12px">$${c.entry} / <span class="neg">$${c.stop}</span> / <span class="pos">$${c.target}</span></td>
-      <td><button class="small" onclick="track('${c.symbol}','${mode}')">Track</button></td></tr>`;
+      <td style="font-size:12px">$${c.entry} / <span class="neg">$${c.stop}</span> / <span class="pos">$${c.target}</span><div class="reasons">Risk $${c.risk_per_share||'—'} / share · ${c.reward_r||'—'}R target</div></td>
+      <td style="font-size:12px">${callInfo(c)}</td></tr>`;
   }
   return h+'</table>';
 }
@@ -233,12 +233,14 @@ async function loadScan(){
     $('swing-cands').innerHTML = candTable(d.swing,'swing');
     $('uni').textContent = 'universe: '+(d.universe||0)+' stocks';
     if(d.ts) $('scan-ts').textContent = 'updated '+new Date(d.ts*1000).toLocaleTimeString();
+    const x=d.diagnostics||{};
+    $('scan-health').innerHTML = x.universe ?
+      `Reviewed <b>${x.evaluated||0}</b> of ${x.selected||0} selected names from ${x.universe} total. `+
+      `<b>${x.day_filter_pass||0}</b> day and <b>${x.swing_filter_pass||0}</b> swing setups passed the quality filter. `+
+      `<b>${(x.day_call_contracts||{}).available||0}</b> day and <b>${(x.swing_call_contracts||{}).available||0}</b> swing real call contracts found. `+
+      `<span class="sub">Call symbols are read from Alpaca; they are research only and are not option orders.</span>` :
+      '<span class="sub">Scan diagnostics unavailable until the next completed scan.</span>';
   }catch(e){}
-}
-async function rescan(){
-  const d = await api('/rescan',{method:'POST',body:'{}'});
-  toast(d.msg||(d.locked?'Enter PIN first':'…'));
-  setTimeout(loadScan, 20000);
 }
 
 // ── Positions ─────────────────────────────────────────────────────
@@ -265,52 +267,10 @@ async function loadTrades(){
     $('positions').innerHTML = h+'</table>';
   }catch(e){}
 }
-async function track(sym, mode){
-  const d = await api('/enter',{method:'POST',body:JSON.stringify({symbol:sym,mode})});
-  toast(d.msg||(d.locked?'Enter PIN first':'…'));
-  loadTrades();
-}
 async function closeTrade(tid){
   const d = await api('/close',{method:'POST',body:JSON.stringify({tid})});
   toast(d.ok?'Closed':(d.msg||'Enter PIN first'));
   loadTrades();
-}
-
-// ── Analyze ───────────────────────────────────────────────────────
-async function analyze(){
-  const sym = $('an-sym').value.toUpperCase().trim();
-  if(!sym) return;
-  $('an-out').innerHTML = '<div class="empty">Analyzing '+sym+'…</div>';
-  await api('/analyze',{method:'POST',body:JSON.stringify({symbol:sym})});
-  let tries = 0;
-  const poll = setInterval(async ()=>{
-    if(++tries>20){clearInterval(poll);return;}
-    const d = await api('/analysis-result?symbol='+sym);
-    if(!d.ready) return;
-    clearInterval(poll);
-    const t = d.tech;
-    let h = '';
-    if(t){
-      h += `<div class="ai-box"><b>${sym}</b>  $${t.price} — signal <b class="${t.signal==='BUY'?'pos':(t.signal==='SELL'?'neg':'')}">${t.signal}</b>
-RSI ${t.rsi} | VWAP $${t.vwap} | ${t.above_vwap?'above':'below'} VWAP | bull ${t.bull_pts}/4
-Support $${t.support} | Resistance $${t.resistance}</div>`;
-    } else h += '<div class="empty">No data for '+sym+'</div>';
-    if(d.ai) h += `<div class="ai-box">🤖 ${d.ai}</div>`;
-    h += '<canvas id="an-chart" height="150" style="margin-top:8px"></canvas>';
-    $('an-out').innerHTML = h;
-    if(d.bars&&d.bars.length) lineChart('an-chart', d.bars.map(b=>b.c), d.bars.map(b=>b.hm));
-  },2500);
-}
-
-// ── Telegram test ─────────────────────────────────────────────────
-async function tgTest(){
-  toast('Testing Telegram…');
-  const d = await api('/telegram-test',{method:'POST',body:'{}'});
-  if(d.locked){toast('Enter PIN first');return;}
-  const g = d.diag||{};
-  if(d.ok) toast('✅ Sent! Check your Telegram (bot: @'+(g.bot||'?')+')');
-  else toast('❌ '+(g.send_detail||g.token_error||'failed'));
-  ping();
 }
 
 // ── Progress tab ──────────────────────────────────────────────────
