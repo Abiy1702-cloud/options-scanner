@@ -240,15 +240,36 @@ def performance_metrics():
         current = current + 1 if pnl <= 0 else 0
         loss_streak = max(loss_streak, current)
     exits = {}
+    by_mode = {}
+    by_quality = {}
     for t in completed:
         reason = t.get('exit_reason', 'unknown')
         exits[reason] = exits.get(reason, 0) + 1
+        mode = t.get('mode', 'day')
+        row = by_mode.setdefault(mode, {'trades': 0, 'pnl': 0.0, 'wins': 0, 'r_total': 0.0, 'r_count': 0})
+        row['trades'] += 1; row['pnl'] += float(t.get('pnl', 0))
+        row['wins'] += int(float(t.get('pnl', 0)) > 0)
+        initial_risk = float(t.get('initial_risk_dollars', 0))
+        if initial_risk > 0:
+            row['r_total'] += float(t.get('pnl', 0)) / initial_risk; row['r_count'] += 1
+        score = float(t.get('score', 0) or 0)
+        quality = 'A (65+)' if score >= 65 else ('B (50–64)' if score >= 50 else 'Developing (<50)')
+        q = by_quality.setdefault(quality, {'trades': 0, 'pnl': 0.0, 'wins': 0})
+        q['trades'] += 1; q['pnl'] += float(t.get('pnl', 0)); q['wins'] += int(float(t.get('pnl', 0)) > 0)
+    for row in by_mode.values():
+        row['pnl'] = round(row['pnl'], 2)
+        row['win_rate'] = round(row['wins'] / row['trades'] * 100, 1) if row['trades'] else 0
+        row['avg_r'] = round(row['r_total'] / row['r_count'], 2) if row['r_count'] else None
+        row.pop('r_total'); row.pop('r_count')
+    for row in by_quality.values():
+        row['pnl'] = round(row['pnl'], 2)
+        row['win_rate'] = round(row['wins'] / row['trades'] * 100, 1) if row['trades'] else 0
     return {'expectancy': round(sum(pnls) / len(pnls), 2) if pnls else 0,
             'avg_r': round(sum(rs) / len(rs), 2) if rs else 0,
             'max_drawdown': round(max_dd, 2),
             'max_drawdown_pct': round(max_dd / STARTING_CAPITAL * 100, 2) if STARTING_CAPITAL else 0,
             'best_win_streak': win_streak, 'worst_loss_streak': loss_streak,
-            'exit_reasons': exits}
+            'exit_reasons': exits, 'by_mode_review': by_mode, 'by_quality_review': by_quality}
 
 # ── Telegram (with real diagnostics) ──────────────────────────────────
 def tg(msg):

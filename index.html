@@ -60,6 +60,7 @@ canvas{width:100%;height:170px;display:block}
 .pulse .stat{min-height:74px}.regime{font-size:18px;letter-spacing:.5px}.risk-on{color:var(--green)}.risk-off{color:var(--red)}.mixed{color:var(--amber)}
 .meter{height:7px;background:var(--panel2);border-radius:8px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--blue);border-radius:8px}
 .plan{font-size:11px;color:#c4b5fd;margin-top:4px}.exit-tags{display:flex;gap:6px;flex-wrap:wrap}.exit-tags span{padding:3px 7px;border-radius:6px;background:var(--panel2);font-size:11px;color:var(--dim)}
+.quality{font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:5px;color:#c4b5fd}
 @media(max-width:700px){ th:nth-child(6),td:nth-child(6){display:none} }
 </style>
 </head>
@@ -133,6 +134,7 @@ canvas{width:100%;height:170px;display:block}
       <div class="stat"><div class="lbl">Best / Worst</div><div class="val" id="p-bw" style="font-size:14px">—</div></div>
     </div>
     <div id="p-extra"></div>
+    <div id="strategy-review"></div>
 
     <div class="panel">
       <h2>Equity Curve</h2>
@@ -229,12 +231,18 @@ function planInfo(c){
   if(!p.available) return '<div class="plan">Paper plan: '+(p.reason||'unavailable')+'</div>';
   return '<div class="plan">Paper plan: '+p.shares+' sh · '+money(p.cost)+' · risk '+money(p.risk_dollars)+' ('+p.risk_pct+'%) · '+p.rr+'R</div>';
 }
+function quality(c){
+  const s=Number(c.score||0), rr=Number(c.reward_r||0);
+  if(s>=65&&rr>=2) return '<span class="quality">A setup</span>';
+  if(s>=50) return '<span class="quality">B setup</span>';
+  return '<span class="quality">Developing</span>';
+}
 function candTable(list, mode){
   if(!list||!list.length) return '<div class="empty">No candidates right now — the automated scan refreshes every 3 minutes during market hours.</div>';
   let h = `<table><tr><th>Symbol</th><th>Price</th><th>Today</th><th>RVOL</th><th>Score</th>
            <th>Entry / Stop / Target</th><th>Real Call Research</th></tr>`;
   for(const c of list){
-    h += `<tr><td><span class="sym">${c.symbol}</span><div class="reasons">${(c.reasons||[]).join(' · ')}</div></td>
+    h += `<tr><td><span class="sym">${c.symbol}</span>${quality(c)}<div class="reasons">${(c.reasons||[]).join(' · ')}</div></td>
       <td>$${c.price}</td>
       <td class="${cls(c.pct_today)}">${c.pct_today>0?'+':''}${c.pct_today}%</td>
       <td>${c.rvol}x</td>
@@ -325,6 +333,13 @@ async function loadProgress(){
       '<div class="stat"><div class="lbl">Max Drawdown</div><div class="val neg">'+money(m.max_drawdown)+' ('+(m.max_drawdown_pct??0)+'%)</div></div>'+
       '<div class="stat"><div class="lbl">Best / Worst streak</div><div class="val">'+(m.best_win_streak??0)+'W / '+(m.worst_loss_streak??0)+'L</div></div></div>'+
       '<div class="exit-tags">'+(Object.entries(m.exit_reasons||{}).map(([k,v])=>'<span>'+k+': '+v+'</span>').join('')||'<span>No exits yet</span>')+'</div>';
+    const reviewRow=(name,x)=>'<tr><td>'+name+'</td><td>'+x.trades+'</td><td class="'+cls(x.pnl)+'">'+money(x.pnl)+'</td><td>'+x.win_rate+'%</td><td>'+((x.avg_r==null)?'—':x.avg_r+'R')+'</td></tr>';
+    const modeRows=Object.entries(m.by_mode_review||{}).map(([k,v])=>reviewRow(k.toUpperCase(),v)).join('');
+    const qualityRows=Object.entries(m.by_quality_review||{}).map(([k,v])=>reviewRow(k,v)).join('');
+    $('strategy-review').innerHTML = (modeRows||qualityRows) ?
+      '<div class="panel"><h2>Strategy Review <span class="sub">closed paper trades only — use a larger sample before changing rules</span></h2>'+
+      '<table><tr><th>Bucket</th><th>Trades</th><th>P&L</th><th>Win rate</th><th>Avg R</th></tr>'+modeRows+qualityRows+'</table></div>' :
+      '<div class="panel"><h2>Strategy Review</h2><div class="empty">Closes will be grouped by mode and setup quality here.</div></div>';
 
     // equity curve
     const eh = d.equity_history||[];
