@@ -175,6 +175,81 @@ def equity():
         val += t.get('current', t['entry']) * t['shares']
     return round(val, 2)
 
+def paper_trade_plan(cand):
+    """Return a transparent *simulated* sizing plan. Never submits an order."""
+    try:
+        entry, stop = float(cand['entry']), float(cand['stop'])
+        if entry <= stop:
+            return {'available': False, 'reason': 'invalid stop'}
+        eq = equity()
+        risk_budget = eq * RISK_PER_TRADE
+        position_cap = eq * (DAY_POS_CAP if cand.get('mode') == 'day' else SWING_POS_CAP)
+        deployment_room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
+        shares = min(risk_budget / (entry - stop), position_cap / entry,
+                     deployment_room / entry, state['capital'] / entry)
+        shares = int(shares)
+        if shares < 1:
+            return {'available': False, 'reason': 'insufficient paper buying power'}
+        cost = round(shares * entry, 2)
+        return {'available': True, 'shares': shares, 'cost': cost,
+                'risk_dollars': round(shares * (entry - stop), 2),
+                'risk_pct': round(shares * (entry - stop) / max(eq, 1) * 100, 2),
+                'position_pct': round(cost / max(eq, 1) * 100, 1),
+                'rr': round((float(cand['target']) - entry) / (entry - stop), 2)}
+    except (KeyError, TypeError, ValueError):
+        return {'available': False, 'reason': 'incomplete candidate'}
+
+def market_pulse():
+    """Small, explainable market context based only on the live price cache."""
+    spy, qqq = cp('SPY') or {}, cp('QQQ') or {}
+    sp, qp = spy.get('pct'), qqq.get('pct')
+    if sp is None or qp is None:
+        regime, note = 'WAITING', 'Index quotes are loading'
+    elif sp >= 0 and qp >= 0:
+        regime, note = 'RISK-ON', 'SPY and QQQ are both positive today'
+    elif sp <= 0 and qp <= 0:
+        regime, note = 'RISK-OFF', 'SPY and QQQ are both negative today'
+    else:
+        regime, note = 'MIXED', 'Major indexes disagree — reduce conviction'
+    return {'regime': regime, 'note': note,
+            'spy': {'price': spy.get('price'), 'pct': sp},
+            'qqq': {'price': qqq.get('price'), 'pct': qp},
+            'as_of': state.get('price_ts', 0)}
+
+def performance_metrics():
+    """Trader-style statistics from closed simulated trades only."""
+    completed = state['completed']
+    pnls = [float(t.get('pnl', 0)) for t in completed]
+    rs = []
+    for t in completed:
+        initial_risk = (float(t.get('entry', 0)) - float(t.get('initial_stop', t.get('stop', 0)))) * float(t.get('shares', 0))
+        if initial_risk > 0:
+            rs.append(float(t.get('pnl', 0)) / initial_risk)
+    curve = [STARTING_CAPITAL]
+    for pnl in pnls: curve.append(curve[-1] + pnl)
+    high, max_dd = curve[0], 0.0
+    for value in curve:
+        high = max(high, value)
+        max_dd = max(max_dd, high - value)
+    win_streak = loss_streak = current = 0
+    for pnl in pnls:
+        current = current + 1 if pnl > 0 else 0
+        win_streak = max(win_streak, current)
+    current = 0
+    for pnl in pnls:
+        current = current + 1 if pnl <= 0 else 0
+        loss_streak = max(loss_streak, current)
+    exits = {}
+    for t in completed:
+        reason = t.get('exit_reason', 'unknown')
+        exits[reason] = exits.get(reason, 0) + 1
+    return {'expectancy': round(sum(pnls) / len(pnls), 2) if pnls else 0,
+            'avg_r': round(sum(rs) / len(rs), 2) if rs else 0,
+            'max_drawdown': round(max_dd, 2),
+            'max_drawdown_pct': round(max_dd / STARTING_CAPITAL * 100, 2) if STARTING_CAPITAL else 0,
+            'best_win_streak': win_streak, 'worst_loss_streak': loss_streak,
+            'exit_reasons': exits}
+
 # ── Telegram (with real diagnostics) ──────────────────────────────────
 def tg(msg):
     """Send a Telegram message. Returns (ok, detail). Failures are recorded."""
@@ -534,6 +609,10 @@ def run_scan(announce=False):
     day, swing, n, diag = deep_scan()
     diag['day_call_contracts'] = enrich_with_real_calls(day)
     diag['swing_call_contracts'] = enrich_with_real_calls(swing)
+    # Make candidate sizing auditable before an automatic paper entry is considered.
+    # This is intentionally informational; enter_trade always re-checks risk.
+    for cand in day + swing:
+        cand['paper_plan'] = paper_trade_plan(cand)
     state['scan'] = {'day': day, 'swing': swing, 'ts': time.time(), 'universe': n,
                      'diagnostics': diag}
     stream_set_symbols()
@@ -825,6 +904,8 @@ def enter_trade(cand, manual=False):
         'entry_time': now_str(), 'entry_date': today(), 'entered_at': time.time(),
         'manual': manual, 'score': cand.get('score', 0),
         'reasons': cand.get('reasons', []),
+        'initial_risk_dollars': round(shares * (price - stop), 2),
+        'planned_rr': round((target - price) / (price - stop), 2),
     }
     state['capital'] = round(state['capital'] - cost, 2)
     _reset_symbol_entries_if_new_day()
@@ -966,7 +1047,7 @@ def _cors(data, status=200):
     return r
 
 PUBLIC = {'/', '/ping', '/scan', '/trades', '/performance', '/logs', '/risk',
-          '/candles', '/technicals', '/analysis-result', '/prices'}
+          '/candles', '/technicals', '/analysis-result', '/prices', '/dashboard'}
 
 @app.before_request
 def auth():
@@ -1019,11 +1100,41 @@ def prices_route():
 
 @app.route('/trades')
 def trades_route():
+    eq = equity()
+    open_risk = round(sum(max((t['entry'] - t.get('stop', t['entry'])) * t['shares'], 0)
+                              for t in state['trades'].values()), 2)
     return _cors({'trades': list(state['trades'].values()),
-                  'capital': state['capital'], 'equity': equity(),
+                  'capital': state['capital'], 'equity': eq,
                   'daily_pnl': state['daily_pnl'],
                   'limits': {'max_deployed_pct': MAX_DEPLOYED_PCT,
-                             'deployed_pct': round(deployed_value() / equity() * 100, 1) if equity() else 0}})
+                             'deployed_pct': round(deployed_value() / eq * 100, 1) if eq else 0,
+                             'deployed_value': round(deployed_value(), 2),
+                             'open_risk_dollars': open_risk,
+                             'open_risk_pct': round(open_risk / eq * 100, 2) if eq else 0}})
+
+@app.route('/dashboard')
+def dashboard_route():
+    """Read-only command-center payload. It is safe to expose without the action PIN."""
+    eq = equity()
+    return _cors({
+        'mode': 'PAPER_ONLY',
+        'market': market_pulse(),
+        'portfolio': {
+            'equity': eq, 'cash': state['capital'],
+            'deployed_value': round(deployed_value(), 2),
+            'deployed_pct': round(deployed_value() / eq * 100, 1) if eq else 0,
+            'open_positions': len(state['trades']),
+            'available_slots': max(MAX_OPEN_POSITIONS - len(state['trades']), 0),
+        },
+        'risk': {
+            'entries_enabled': not state['risk'].get('kill_switch'),
+            'reason': state['risk'].get('kill_reason', ''),
+            'daily_pnl': state['daily_pnl'],
+            'daily_loss_remaining': round(max(DAILY_LOSS_LIMIT * max(eq, STARTING_CAPITAL) + state['daily_pnl'], 0), 2),
+            'entries_today': state['risk'].get('entries_today', 0),
+        },
+        'performance': performance_metrics(),
+    })
 
 @app.route('/performance')
 def performance():
@@ -1051,6 +1162,7 @@ def performance():
         'daily_pnl': state['daily_pnl'],
         'equity_history': state['equity_history'][-120:],
         'history': list(reversed(c[-100:])),
+        'metrics': performance_metrics(),
     })
 
 @app.route('/logs')

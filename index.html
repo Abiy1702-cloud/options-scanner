@@ -56,6 +56,10 @@ canvas{width:100%;height:170px;display:block}
 .tag{font-size:10px;padding:2px 7px;border-radius:5px;font-weight:700;letter-spacing:.5px}
 .tag.day{background:#172554;color:#93c5fd}.tag.swing{background:#3b1d54;color:#d8b4fe}
 .warn{background:#271a06;border:1px solid #7c5806;color:#fbbf24;border-radius:8px;padding:9px 12px;font-size:12px;margin-bottom:12px}
+.pulse{display:grid;grid-template-columns:1.1fr repeat(3,minmax(110px,1fr));gap:8px;margin-bottom:12px}
+.pulse .stat{min-height:74px}.regime{font-size:18px;letter-spacing:.5px}.risk-on{color:var(--green)}.risk-off{color:var(--red)}.mixed{color:var(--amber)}
+.meter{height:7px;background:var(--panel2);border-radius:8px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--blue);border-radius:8px}
+.plan{font-size:11px;color:#c4b5fd;margin-top:4px}.exit-tags{display:flex;gap:6px;flex-wrap:wrap}.exit-tags span{padding:3px 7px;border-radius:6px;background:var(--panel2);font-size:11px;color:var(--dim)}
 @media(max-width:700px){ th:nth-child(6),td:nth-child(6){display:none} }
 </style>
 </head>
@@ -80,6 +84,13 @@ canvas{width:100%;height:170px;display:block}
     <div class="stat"><div class="lbl">Today P&L</div><div class="val" id="s-day">—</div></div>
     <div class="stat"><div class="lbl">Total P&L</div><div class="val" id="s-tot">—</div></div>
     <div class="stat"><div class="lbl">Win Rate</div><div class="val" id="s-wr">—</div></div>
+  </div>
+
+  <div class="pulse">
+    <div class="stat"><div class="lbl">Market Pulse</div><div class="val regime" id="m-regime">—</div><div class="reasons" id="m-note">Loading index context…</div></div>
+    <div class="stat"><div class="lbl">SPY / QQQ</div><div class="val" id="m-indexes">—</div><div class="reasons">daily index change</div></div>
+    <div class="stat"><div class="lbl">Capital Deployed</div><div class="val" id="m-deployed">—</div><div class="meter"><i id="m-deploy-bar" style="width:0%"></i></div></div>
+    <div class="stat"><div class="lbl">Daily Loss Room</div><div class="val" id="m-loss-room">—</div><div class="reasons" id="m-entry-status">—</div></div>
   </div>
 
   <div class="tabs">
@@ -121,6 +132,7 @@ canvas{width:100%;height:170px;display:block}
       <div class="stat"><div class="lbl">Profit Factor</div><div class="val" id="p-pf">—</div></div>
       <div class="stat"><div class="lbl">Best / Worst</div><div class="val" id="p-bw" style="font-size:14px">—</div></div>
     </div>
+    <div id="p-extra"></div>
 
     <div class="panel">
       <h2>Equity Curve</h2>
@@ -211,6 +223,12 @@ function callInfo(c){
   const oi=o.open_interest!=null?` · OI ${o.open_interest}`:'';
   return `<b>${o.symbol}</b><div class="reasons">Call · $${o.strike} · ${o.expiry} (${o.dte}DTE)${oi}</div>`;
 }
+function planInfo(c){
+  const p=c.paper_plan;
+  if(!p) return '';
+  if(!p.available) return '<div class="plan">Paper plan: '+(p.reason||'unavailable')+'</div>';
+  return '<div class="plan">Paper plan: '+p.shares+' sh · '+money(p.cost)+' · risk '+money(p.risk_dollars)+' ('+p.risk_pct+'%) · '+p.rr+'R</div>';
+}
 function candTable(list, mode){
   if(!list||!list.length) return '<div class="empty">No candidates right now — the automated scan refreshes every 3 minutes during market hours.</div>';
   let h = `<table><tr><th>Symbol</th><th>Price</th><th>Today</th><th>RVOL</th><th>Score</th>
@@ -221,7 +239,7 @@ function candTable(list, mode){
       <td class="${cls(c.pct_today)}">${c.pct_today>0?'+':''}${c.pct_today}%</td>
       <td>${c.rvol}x</td>
       <td><span class="score ${scoreCls(c.score)}">${c.score}</span></td>
-      <td style="font-size:12px">$${c.entry} / <span class="neg">$${c.stop}</span> / <span class="pos">$${c.target}</span><div class="reasons">Risk $${c.risk_per_share||'—'} / share · ${c.reward_r||'—'}R target</div></td>
+      <td style="font-size:12px">$${c.entry} / <span class="neg">$${c.stop}</span> / <span class="pos">$${c.target}</span><div class="reasons">Risk $${c.risk_per_share||'—'} / share · ${c.reward_r||'—'}R target</div>${planInfo(c)}</td>
       <td style="font-size:12px">${callInfo(c)}</td></tr>`;
   }
   return h+'</table>';
@@ -243,6 +261,22 @@ async function loadScan(){
   }catch(e){}
 }
 
+async function loadDashboard(){
+  try{
+    const d=await api('/dashboard'), m=d.market||{}, p=d.portfolio||{}, r=d.risk||{};
+    const regime=(m.regime||'—').toLowerCase().replace(/[^a-z-]/g,'');
+    $('m-regime').textContent=m.regime||'—';
+    $('m-regime').className='val regime '+regime;
+    $('m-note').textContent=m.note||'—';
+    const ix=x=>x==null?'—':(x>0?'+':'')+Number(x).toFixed(2)+'%';
+    $('m-indexes').textContent=ix((m.spy||{}).pct)+' / '+ix((m.qqq||{}).pct);
+    $('m-deployed').textContent=(p.deployed_pct??0)+'%';
+    $('m-deploy-bar').style.width=Math.min(100,p.deployed_pct||0)+'%';
+    $('m-loss-room').textContent=money(r.daily_loss_remaining);
+    $('m-entry-status').textContent=r.entries_enabled?'Entries enabled':'Entries stopped: '+(r.reason||'risk control');
+  }catch(e){}
+}
+
 // ── Positions ─────────────────────────────────────────────────────
 async function loadTrades(){
   try{
@@ -261,7 +295,7 @@ async function loadTrades(){
         <td><span class="tag ${x.mode}">${x.mode.toUpperCase()}</span></td>
         <td>$${x.entry}</td><td>$${x.current}</td>
         <td class="${cls(x.pnl)}">${money(x.pnl)} (${x.pnl_pct>0?'+':''}${x.pnl_pct}%)</td>
-        <td style="font-size:12px"><span class="neg">$${x.stop}</span> → <span class="pos">$${x.target}</span></td>
+        <td style="font-size:12px"><span class="neg">$${x.stop}</span> → <span class="pos">$${x.target}</span><div class="reasons">Initial risk ${money(x.initial_risk_dollars)} · ${x.planned_rr||'—'}R plan</div></td>
         <td><button class="small danger" onclick="closeTrade('${x.id}')">Close</button></td></tr>`;
     }
     $('positions').innerHTML = h+'</table>';
@@ -284,6 +318,13 @@ async function loadProgress(){
     $('p-al').textContent  = money(d.avg_loss);
     $('p-pf').textContent  = d.profit_factor??'—';
     $('p-bw').innerHTML    = `<span class="pos">${money(d.best)}</span> / <span class="neg">${money(d.worst)}</span>`;
+    const m=d.metrics||{};
+    $('p-extra').innerHTML = '<div class="stats">'+
+      '<div class="stat"><div class="lbl">Expectancy / trade</div><div class="val '+cls(m.expectancy)+'">'+money(m.expectancy)+'</div></div>'+
+      '<div class="stat"><div class="lbl">Average R</div><div class="val '+cls(m.avg_r)+'">'+(m.avg_r??'—')+'R</div></div>'+
+      '<div class="stat"><div class="lbl">Max Drawdown</div><div class="val neg">'+money(m.max_drawdown)+' ('+(m.max_drawdown_pct??0)+'%)</div></div>'+
+      '<div class="stat"><div class="lbl">Best / Worst streak</div><div class="val">'+(m.best_win_streak??0)+'W / '+(m.worst_loss_streak??0)+'L</div></div></div>'+
+      '<div class="exit-tags">'+(Object.entries(m.exit_reasons||{}).map(([k,v])=>'<span>'+k+': '+v+'</span>').join('')||'<span>No exits yet</span>')+'</div>';
 
     // equity curve
     const eh = d.equity_history||[];
@@ -343,11 +384,12 @@ function lineChart(id, ys, xs){
 }
 
 // ── Boot / polling ────────────────────────────────────────────────
-ping(); loadScan(); loadTrades(); loadProgress(); loadRisk();
+ping(); loadScan(); loadTrades(); loadProgress(); loadRisk(); loadDashboard();
 setInterval(ping, 20000);
 setInterval(loadRisk, 20000);
 setInterval(loadScan, 20000);
 setInterval(loadTrades, 4000);
+setInterval(loadDashboard, 10000);
 setInterval(()=>{ if($('view-progress').style.display!=='none') loadProgress(); }, 15000);
 </script>
 </body>

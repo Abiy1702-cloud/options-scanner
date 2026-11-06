@@ -23,6 +23,12 @@ greeks, spreads, assignment, or early exercise.
 - Candidate rows include a real, active Alpaca call contract when one is
   available in the selected strike and expiry window. This is read-only research
   data; the service does not paper-trade or submit option orders.
+- The trader dashboard now provides an explainable market pulse (SPY/QQQ),
+  deployment and daily-loss room, and a pre-entry simulated share/cost/risk plan
+  for every candidate. The risk engine re-checks all values at the actual entry.
+- Performance reporting includes expectancy, average R, maximum drawdown, win/loss
+  streaks, and a breakdown of exits. These statistics are drawn only from closed
+  simulated trades and should be evaluated over a broad sample, not a single day.
 
 ## Render setup
 
@@ -51,6 +57,9 @@ so do not remove those two environment variables when deploying manually.
 5. Let a stopped/targeted position close and review `exit_reason`, P&L, and
    the journal record. Do not evaluate strategy quality until at least 30–50
    closed paper trades across multiple market regimes.
+6. Use the market pulse and paper plan as a review aid, not a forecast. Check
+   that capital deployment, open-position risk, and the daily-loss circuit breaker
+   remain within your comfort level before allowing new simulated entries.
 
 ## Later broker integration
 
