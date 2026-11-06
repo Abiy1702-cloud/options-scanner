@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Market Scanner Pro</title>
+<title>Abiy Trading — Paper Desk</title>
 <style>
 :root{
   --bg:#080b14; --panel:rgba(18,24,38,.90); --panel2:#0d1321; --border:#26334a;
@@ -14,8 +14,8 @@
 body{background:radial-gradient(circle at 12% -8%,#192b54 0,transparent 31%),radial-gradient(circle at 95% 8%,#162141 0,transparent 28%),var(--bg);color:var(--text);font-family:Inter,'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
 .wrap{max-width:1220px;margin:0 auto;padding:22px 16px 36px}
 header{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-bottom:16px;padding:4px 2px}
-header h1{font-size:22px;font-weight:800;letter-spacing:-.7px}
-header h1 span{color:var(--blue)}
+.brand{display:flex;align-items:center;gap:11px}.brand-mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-weight:900;letter-spacing:-1px;color:#fff;background:linear-gradient(135deg,#6aa9ff,#704bd6 58%,#40d9d6);box-shadow:0 8px 22px rgba(72,121,231,.32)}
+.brand-copy h1{font-size:22px;font-weight:850;letter-spacing:-.8px;line-height:1.02}.brand-copy h1 span{color:var(--blue)}.brand-copy p{font-size:10px;color:var(--dim);margin-top:4px;letter-spacing:.55px;text-transform:uppercase}
 .badge{font-size:10px;padding:5px 9px;border-radius:20px;border:1px solid var(--border);color:var(--dim);background:rgba(9,14,25,.6);text-transform:uppercase;letter-spacing:.45px}
 .badge.on{color:var(--green);border-color:var(--green)}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:14px}
@@ -62,13 +62,17 @@ canvas{width:100%;height:170px;display:block}
 .plan{font-size:11px;color:#c4b5fd;margin-top:4px}.exit-tags{display:flex;gap:6px;flex-wrap:wrap}.exit-tags span{padding:3px 7px;border-radius:6px;background:var(--panel2);font-size:11px;color:var(--dim)}
 .quality{font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:5px;color:#c4b5fd}
 .system-line{margin-top:7px;font-size:11px;color:var(--dim)}.system-line b{color:var(--text)}
-@media(max-width:700px){.wrap{padding:14px 10px 28px}.pulse{grid-template-columns:repeat(2,1fr)}header h1{width:100%;font-size:21px}th:nth-child(6),td:nth-child(6){display:none}.panel{padding:12px;overflow:auto}}
+.desk-strip{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:-2px 0 14px}.desk-chip{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:9px;background:rgba(13,20,35,.72);border:1px solid var(--border);font-size:11px;color:var(--dim)}.desk-chip b{color:var(--text)}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(53,208,127,.12)}
+@media(max-width:700px){.wrap{padding:14px 10px 28px}.pulse{grid-template-columns:repeat(2,1fr)}.brand-copy h1{font-size:21px}header .badge{font-size:9px}.desk-strip{gap:6px}.desk-chip{padding:6px 8px}th:nth-child(6),td:nth-child(6){display:none}.panel{padding:12px;overflow:auto}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>Market <span>Scanner</span> Pro</h1>
+    <div class="brand">
+      <div class="brand-mark">AT</div>
+      <div class="brand-copy"><h1>Abiy <span>Trading</span></h1><p>Paper Trading Desk</p></div>
+    </div>
     <span class="badge" id="mkt">market: …</span>
     <span class="badge" id="feed">feed: …</span>
     <span class="badge" id="tgb">telegram: …</span>
@@ -77,7 +81,13 @@ canvas{width:100%;height:170px;display:block}
     <span class="badge on">automatic paper mode</span>
   </header>
 
-  <div class="warn">Simulated tracking for learning &amp; discipline — picks are candidates to evaluate, not guaranteed winners. Trade real money only with what you can afford to lose.</div>
+  <div class="warn">Paper-only automated research desk. Signals are evaluated with defined risk; they are not guaranteed winners or live orders.</div>
+
+  <div class="desk-strip">
+    <div class="desk-chip"><span class="live-dot"></span><b>Autopilot</b> monitors every session</div>
+    <div class="desk-chip"><b>Daily cap</b> $1,000 simulated entries</div>
+    <div class="desk-chip"><b>Risk rails</b> loss, exposure &amp; stale-scan protection</div>
+  </div>
 
   <div class="stats">
     <div class="stat"><div class="lbl">Equity</div><div class="val" id="s-eq">—</div></div>
