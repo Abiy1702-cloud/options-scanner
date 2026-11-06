@@ -61,6 +61,7 @@ canvas{width:100%;height:170px;display:block}
 .meter{height:7px;background:var(--panel2);border-radius:8px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--blue);border-radius:8px}
 .plan{font-size:11px;color:#c4b5fd;margin-top:4px}.exit-tags{display:flex;gap:6px;flex-wrap:wrap}.exit-tags span{padding:3px 7px;border-radius:6px;background:var(--panel2);font-size:11px;color:var(--dim)}
 .quality{font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:5px;color:#c4b5fd}
+.system-line{margin-top:7px;font-size:11px;color:var(--dim)}.system-line b{color:var(--text)}
 @media(max-width:700px){ th:nth-child(6),td:nth-child(6){display:none} }
 </style>
 </head>
@@ -121,6 +122,7 @@ canvas{width:100%;height:170px;display:block}
     <div class="panel">
       <h2>🔎 Scanner Health</h2>
       <div id="scan-health" class="empty">Waiting for scan diagnostics…</div>
+      <div id="system-status" class="system-line">Loading system health…</div>
     </div>
   </div>
 
@@ -237,8 +239,12 @@ function quality(c){
   if(s>=50) return '<span class="quality">B setup</span>';
   return '<span class="quality">Developing</span>';
 }
-function candTable(list, mode){
-  if(!list||!list.length) return '<div class="empty">No candidates right now — the automated scan refreshes every 3 minutes during market hours.</div>';
+function candTable(list, mode, marketOpen){
+  if(!list||!list.length){
+    const why=marketOpen ? 'No qualifying '+mode+' setups on this scan. The system is selective; it will check again automatically.'
+      : 'Market is closed. This board will refresh automatically when the regular session opens.';
+    return '<div class="empty">'+why+'</div>';
+  }
   let h = `<table><tr><th>Symbol</th><th>Price</th><th>Today</th><th>RVOL</th><th>Score</th>
            <th>Entry / Stop / Target</th><th>Real Call Research</th></tr>`;
   for(const c of list){
@@ -255,8 +261,8 @@ function candTable(list, mode){
 async function loadScan(){
   try{
     const d = await api('/scan');
-    $('day-cands').innerHTML   = candTable(d.day,'day');
-    $('swing-cands').innerHTML = candTable(d.swing,'swing');
+    $('day-cands').innerHTML   = candTable(d.day,'day',d.market_open);
+    $('swing-cands').innerHTML = candTable(d.swing,'swing',d.market_open);
     $('uni').textContent = 'universe: '+(d.universe||0)+' stocks';
     if(d.ts) $('scan-ts').textContent = 'updated '+new Date(d.ts*1000).toLocaleTimeString();
     const x=d.diagnostics||{};
@@ -271,7 +277,7 @@ async function loadScan(){
 
 async function loadDashboard(){
   try{
-    const d=await api('/dashboard'), m=d.market||{}, p=d.portfolio||{}, r=d.risk||{};
+    const d=await api('/dashboard'), m=d.market||{}, p=d.portfolio||{}, r=d.risk||{}, sys=d.system||{};
     const regime=(m.regime||'—').toLowerCase().replace(/[^a-z-]/g,'');
     $('m-regime').textContent=m.regime||'—';
     $('m-regime').className='val regime '+regime;
@@ -282,6 +288,11 @@ async function loadDashboard(){
     $('m-deploy-bar').style.width=Math.min(100,p.deployed_pct||0)+'%';
     $('m-loss-room').textContent=money(r.daily_loss_remaining);
     $('m-entry-status').textContent=r.entries_enabled?'Entries enabled':'Entries stopped: '+(r.reason||'risk control');
+    const scan=sys.scan_status||{}, clock=sys.clock||{};
+    $('system-status').innerHTML='<b>System:</b> '+(sys.scan_fresh?'scan current':'scan stale')+
+      ' · '+(scan.running?'scanning now':'scan idle')+' · '+(clock.source||'clock unknown')+
+      ' · auto-entry '+(sys.auto_entry_enabled?'enabled':'disabled')+
+      ' · paper fills: '+(sys.paper_slippage_bps??0)+' bps slip';
   }catch(e){}
 }
 
@@ -327,12 +338,13 @@ async function loadProgress(){
     $('p-pf').textContent  = d.profit_factor??'—';
     $('p-bw').innerHTML    = `<span class="pos">${money(d.best)}</span> / <span class="neg">${money(d.worst)}</span>`;
     const m=d.metrics||{};
+    const sample=Math.min(100,Math.round((d.trades||0)/50*100));
     $('p-extra').innerHTML = '<div class="stats">'+
       '<div class="stat"><div class="lbl">Expectancy / trade</div><div class="val '+cls(m.expectancy)+'">'+money(m.expectancy)+'</div></div>'+
       '<div class="stat"><div class="lbl">Average R</div><div class="val '+cls(m.avg_r)+'">'+(m.avg_r??'—')+'R</div></div>'+
       '<div class="stat"><div class="lbl">Max Drawdown</div><div class="val neg">'+money(m.max_drawdown)+' ('+(m.max_drawdown_pct??0)+'%)</div></div>'+
       '<div class="stat"><div class="lbl">Best / Worst streak</div><div class="val">'+(m.best_win_streak??0)+'W / '+(m.worst_loss_streak??0)+'L</div></div></div>'+
-      '<div class="exit-tags">'+(Object.entries(m.exit_reasons||{}).map(([k,v])=>'<span>'+k+': '+v+'</span>').join('')||'<span>No exits yet</span>')+'</div>';
+      '<div class="exit-tags"><span>Sample progress: '+(d.trades||0)+'/50 closed paper trades</span>'+(Object.entries(m.exit_reasons||{}).map(([k,v])=>'<span>'+k+': '+v+'</span>').join('')||'<span>No exits yet</span>')+'</div>';
     const reviewRow=(name,x)=>'<tr><td>'+name+'</td><td>'+x.trades+'</td><td class="'+cls(x.pnl)+'">'+money(x.pnl)+'</td><td>'+x.win_rate+'%</td><td>'+((x.avg_r==null)?'—':x.avg_r+'R')+'</td></tr>';
     const modeRows=Object.entries(m.by_mode_review||{}).map(([k,v])=>reviewRow(k.toUpperCase(),v)).join('');
     const qualityRows=Object.entries(m.by_quality_review||{}).map(([k,v])=>reviewRow(k,v)).join('');

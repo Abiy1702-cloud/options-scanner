@@ -6,7 +6,7 @@ The current simulator uses the underlying stock price as an explicit
 `underlying_equity_proxy`; it does not claim to model option-contract fills,
 greeks, spreads, assignment, or early exercise.
 
-## What changed in v6
+## What changed in v7
 
 - Entry selection rejects low-priced, thin, and parabolic momentum candidates,
   while treating incomplete daily volume as a score input rather than an
@@ -29,6 +29,16 @@ greeks, spreads, assignment, or early exercise.
 - Performance reporting includes expectancy, average R, maximum drawdown, win/loss
   streaks, and a breakdown of exits. These statistics are drawn only from closed
   simulated trades and should be evaluated over a broad sample, not a single day.
+- Scans are serialized so a slow data download cannot overlap the next scheduled
+  scan. Auto-entry refuses stale scan results.
+- The service uses Alpaca's market clock when credentials are present, with a
+  weekday/time fallback only when the clock is unavailable. This handles market
+  holidays and early closes better than a hard-coded session window.
+- Simulated entries and exits apply configurable adverse price slippage (5 bps by
+  default) and optional per-share commissions. The dashboard identifies these as
+  simulation assumptions, not actual broker fills.
+- Background workers can be disabled with `ENABLE_BACKGROUND_JOBS=false` for
+  safe local testing. The included unit tests cover the core risk-engine gates.
 
 ## Render setup
 
@@ -45,6 +55,11 @@ The included Render blueprint attaches a persistent disk at `/var/data` and
 stores both state and journals there. Render's default filesystem is ephemeral,
 so do not remove those two environment variables when deploying manually.
 
+Useful non-secret settings in the blueprint are `AUTO_ENTRY_ENABLED`,
+`SCAN_STALE_SECONDS`, `PAPER_SLIPPAGE_BPS`, and
+`PAPER_COMMISSION_PER_SHARE`. Do not set the Alpaca trading base URL to a live
+endpoint in this application: it is intentionally read-only and paper-only.
+
 ## Test checklist
 
 1. Open `/ping` and confirm `mode` is `PAPER_ONLY` and version is
@@ -60,6 +75,9 @@ so do not remove those two environment variables when deploying manually.
 6. Use the market pulse and paper plan as a review aid, not a forecast. Check
    that capital deployment, open-position risk, and the daily-loss circuit breaker
    remain within your comfort level before allowing new simulated entries.
+7. Run `py -3 -m unittest -v test_paper_agent.py` from the repository root.
+   For a no-background-worker app smoke test, set
+   `ENABLE_BACKGROUND_JOBS=false` first.
 
 ## Later broker integration
 

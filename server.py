@@ -12,6 +12,7 @@ Market Scanner Pro v5 — full rebuild
 """
 
 import os, json, time, uuid, threading, urllib.request, urllib.error
+from functools import wraps
 from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, send_from_directory, request
@@ -70,6 +71,13 @@ MAX_TRADES_PER_DAY   = int(os.environ.get('MAX_TRADES_PER_DAY', 0))
 MAX_DAILY_DRAWDOWN_R = float(os.environ.get('MAX_DAILY_DRAWDOWN_R', 3.0))
 SYMBOL_COOLDOWN_SEC  = int(os.environ.get('SYMBOL_COOLDOWN_SEC', 900))  # 15 min before re-entering a symbol just exited (win or loss) — stops VEEE-style churn
 MAX_ENTRIES_PER_SYMBOL_DAY = int(os.environ.get('MAX_ENTRIES_PER_SYMBOL_DAY', 2))  # hard cap on repeat entries into one symbol per day
+SCAN_STALE_SECONDS = int(os.environ.get('SCAN_STALE_SECONDS', 600))
+AUTO_ENTRY_ENABLED = os.environ.get('AUTO_ENTRY_ENABLED', 'true').lower() == 'true'
+# Conservative paper-fill assumptions make the journal more useful than a
+# frictionless last-trade-price simulation. They are not broker fills.
+PAPER_SLIPPAGE_BPS = float(os.environ.get('PAPER_SLIPPAGE_BPS', 5.0))
+PAPER_COMMISSION_PER_SHARE = float(os.environ.get('PAPER_COMMISSION_PER_SHARE', 0.0))
+ENABLE_BACKGROUND_JOBS = os.environ.get('ENABLE_BACKGROUND_JOBS', 'true').lower() == 'true'
 RISK_ENGINE = RiskEngine(RiskLimits(RISK_PER_TRADE, DAILY_LOSS_LIMIT,
                                     MAX_OPEN_POSITIONS, MAX_TRADES_PER_DAY,
                                     MAX_DEPLOYED_PCT))
@@ -103,10 +111,14 @@ state = {
     'symbol_entries': {'date': '', 'counts': {}},  # entries per symbol today
     'stream_status': {'connected': False, 'authed': False, 'error': '', 'last_tick': 0, 'symbols': 0},
     'option_cache': {},
+    'market_clock': {'checked_at': 0, 'is_open': None, 'next_open': '', 'next_close': '', 'source': 'fallback'},
+    'scan_status': {'running': False, 'last_started': 0, 'last_completed': 0, 'last_error': ''},
     'risk': {'kill_switch': os.environ.get('PAPER_TRADING_ENABLED', 'true').lower() != 'true',
              'kill_reason': '', 'entries_today': 0, 'realized_r_today': 0.0},
 }
-_lock = threading.Lock()
+_lock = threading.RLock()
+_scan_lock = threading.Lock()
+_trade_lock = threading.RLock()
 
 def now_et():   return datetime.now(ET)
 def today():    return now_et().strftime('%Y-%m-%d')
@@ -126,9 +138,36 @@ def disable_entries(reason):
     journal('kill_switch', {'reason': reason})
     log(f'KILL SWITCH: {reason}', alert=True)
 
+def refresh_market_clock(force=False):
+    """Cache the broker market clock; fall back safely when it is unavailable."""
+    cached = state['market_clock']
+    if not force and time.time() - cached.get('checked_at', 0) < 30:
+        return cached
+    if ALPACA_KEY and ALPACA_SECRET:
+        clock = _alpaca_trading_get('/v2/clock')
+        if isinstance(clock, dict) and 'is_open' in clock:
+            cached.update({'checked_at': time.time(), 'is_open': bool(clock.get('is_open')),
+                           'next_open': clock.get('next_open', ''), 'next_close': clock.get('next_close', ''),
+                           'source': 'alpaca_clock'})
+            return cached
+    n = now_et(); minutes = n.hour * 60 + n.minute
+    cached.update({'checked_at': time.time(), 'is_open': n.weekday() < 5 and 570 <= minutes < 960,
+                   'next_open': '', 'next_close': '', 'source': 'weekday_fallback'})
+    return cached
+
 def market_open():
-    n = now_et(); t = n.hour * 60 + n.minute
-    return n.weekday() < 5 and 570 <= t < 960          # 9:30–16:00
+    return bool(refresh_market_clock().get('is_open'))
+
+def scan_is_fresh():
+    return bool(state['scan'].get('ts')) and time.time() - state['scan']['ts'] <= SCAN_STALE_SECONDS
+
+def trade_locked(fn):
+    """Serialize position mutations from the scheduler and price-stream thread."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _trade_lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 def save_state():
     try:
@@ -178,7 +217,7 @@ def equity():
 def paper_trade_plan(cand):
     """Return a transparent *simulated* sizing plan. Never submits an order."""
     try:
-        entry, stop = float(cand['entry']), float(cand['stop'])
+        entry, stop = paper_fill_price(float(cand['entry']), 'buy'), float(cand['stop'])
         if entry <= stop:
             return {'available': False, 'reason': 'invalid stop'}
         eq = equity()
@@ -190,7 +229,7 @@ def paper_trade_plan(cand):
         shares = int(shares)
         if shares < 1:
             return {'available': False, 'reason': 'insufficient paper buying power'}
-        cost = round(shares * entry, 2)
+        cost = round(shares * entry + shares * PAPER_COMMISSION_PER_SHARE, 2)
         return {'available': True, 'shares': shares, 'cost': cost,
                 'risk_dollars': round(shares * (entry - stop), 2),
                 'risk_pct': round(shares * (entry - stop) / max(eq, 1) * 100, 2),
@@ -653,6 +692,23 @@ def run_scan(announce=False):
 # ══════════════════════════════════════════════════════════════════════
 # INTRADAY TECHNICALS (confirmation for day entries + analyze box)
 # ══════════════════════════════════════════════════════════════════════
+def run_scan_safely(announce=False):
+    """Do not allow a slow market-data scan to overlap the next scheduled scan."""
+    if not _scan_lock.acquire(blocking=False):
+        return False
+    state['scan_status'].update({'running': True, 'last_started': time.time(), 'last_error': ''})
+    try:
+        run_scan(announce=announce)
+        state['scan_status']['last_completed'] = time.time()
+        return True
+    except Exception as e:
+        state['scan_status']['last_error'] = '{}: {}'.format(type(e).__name__, e)
+        log('Scan error: {}'.format(type(e).__name__))
+        return False
+    finally:
+        state['scan_status']['running'] = False
+        _scan_lock.release()
+
 def compute_technicals(sym):
     if not yf or np is None: return None
     try:
@@ -849,12 +905,19 @@ def deployed_value():
     """Market value currently tied up in open positions (cost basis)."""
     return sum(t.get('cost', t['entry'] * t['shares']) for t in state['trades'].values())
 
+def paper_fill_price(reference_price, side):
+    """Conservative simulated fill: buys pay up and sells receive less."""
+    reference = float(reference_price)
+    slip = reference * PAPER_SLIPPAGE_BPS / 10000.0
+    return round(reference + slip if side == 'buy' else reference - slip, 4)
+
 def _reset_symbol_entries_if_new_day():
     se = state['symbol_entries']
     if se.get('date') != today():
         se['date'] = today()
         se['counts'] = {}
 
+@trade_locked
 def enter_trade(cand, manual=False):
     sym, mode = cand['symbol'], cand.get('mode', 'day')
     if state['risk'].get('kill_switch'):
@@ -888,7 +951,8 @@ def enter_trade(cand, manual=False):
         if state['symbol_entries']['counts'].get(sym, 0) >= MAX_ENTRIES_PER_SYMBOL_DAY:
             return False, f'{sym} already traded {MAX_ENTRIES_PER_SYMBOL_DAY}x today — skipping'
 
-    price  = float(cand['entry'])
+    reference_price = float(cand['entry'])
+    price  = paper_fill_price(reference_price, 'buy')
     stop   = float(cand['stop'])
     target = float(cand['target'])
     if price <= stop: return False, 'Bad stop'
@@ -911,13 +975,15 @@ def enter_trade(cand, manual=False):
     room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
     shares = min(shares, room / price)
     shares = round(shares, 4)
-    cost = round(shares * price, 2)
+    entry_commission = round(shares * PAPER_COMMISSION_PER_SHARE, 2)
+    cost = round(shares * price + entry_commission, 2)
     if shares <= 0 or cost > state['capital']:
         return False, f'Insufficient free cash (${state["capital"]:.0f})'
 
     tid = str(uuid.uuid4())[:8]
     state['trades'][tid] = {
         'id': tid, 'symbol': sym, 'mode': mode, 'entry': round(price, 2),
+        'entry_reference': round(reference_price, 2),
         'instrument': 'underlying_equity_proxy', 'execution': 'simulated',
         'shares': shares, 'cost': cost, 'initial_stop': stop, 'stop': stop, 'target': target,
         'current': round(price, 2), 'peak': round(price, 2),
@@ -927,6 +993,8 @@ def enter_trade(cand, manual=False):
         'reasons': cand.get('reasons', []),
         'initial_risk_dollars': round(shares * (price - stop), 2),
         'planned_rr': round((target - price) / (price - stop), 2),
+        'entry_commission': entry_commission,
+        'paper_slippage_bps': PAPER_SLIPPAGE_BPS,
     }
     state['capital'] = round(state['capital'] - cost, 2)
     _reset_symbol_entries_if_new_day()
@@ -941,19 +1009,24 @@ def enter_trade(cand, manual=False):
     journal('entry', state['trades'][tid])
     return True, f'Entered {sym} ({mode})'
 
+@trade_locked
 def close_trade(tid, reason):
     t = state['trades'].pop(tid, None)
     if not t: return
     q = cp(t['symbol'])
-    exit_price = q['price'] if q else t['current']
-    pnl = round((exit_price - t['entry']) * t['shares'], 2)
-    pnl_pct = round((exit_price - t['entry']) / t['entry'] * 100, 2)
-    state['capital'] = round(state['capital'] + exit_price * t['shares'], 2)
+    reference_exit = q['price'] if q else t['current']
+    exit_price = paper_fill_price(reference_exit, 'sell')
+    exit_commission = round(t['shares'] * PAPER_COMMISSION_PER_SHARE, 2)
+    proceeds = round(exit_price * t['shares'] - exit_commission, 2)
+    pnl = round(proceeds - t.get('cost', t['entry'] * t['shares']), 2)
+    pnl_pct = round(pnl / max(t.get('cost', t['entry'] * t['shares']), 0.01) * 100, 2)
+    state['capital'] = round(state['capital'] + proceeds, 2)
     state['daily_pnl'] = round(state['daily_pnl'] + pnl, 2)
     label = {'target': '🎯 TARGET', 'stop': '🛑 STOP', 'trail': '📈 TRAIL',
              'eod': '🌙 EOD', 'time': '⏰ TIME EXIT', 'manual': '👤 MANUAL'}.get(reason, reason)
-    rec = {**t, 'exit_price': round(exit_price, 2), 'exit_reason': reason,
-           'exit_time': now_str(), 'exit_date': today(), 'pnl': pnl, 'pnl_pct': pnl_pct}
+    rec = {**t, 'exit_price': round(exit_price, 2), 'exit_reference': round(reference_exit, 2),
+           'exit_commission': exit_commission, 'total_commission': round(t.get('entry_commission', 0) + exit_commission, 2),
+           'exit_reason': reason, 'exit_time': now_str(), 'exit_date': today(), 'pnl': pnl, 'pnl_pct': pnl_pct}
     state['completed'].append(rec)
     initial_risk = max((t['entry'] - t.get('initial_stop', t['stop'])) * t['shares'], 0.01)
     state['risk']['realized_r_today'] = round(state['risk'].get('realized_r_today', 0.0) + pnl / initial_risk, 2)
@@ -967,6 +1040,7 @@ def close_trade(tid, reason):
     if state['risk']['realized_r_today'] <= -MAX_DAILY_DRAWDOWN_R:
         disable_entries(f'daily R-loss limit ({MAX_DAILY_DRAWDOWN_R:.1f}R) reached')
 
+@trade_locked
 def monitor_trades():
     if not state['trades']: return
     for tid, t in list(state['trades'].items()):
@@ -977,9 +1051,12 @@ def monitor_trades():
         peak = max(price, t.get('peak', price))
         pnl_pct = (price - entry) / entry * 100
         peak_pct = (peak - entry) / entry * 100
+        estimated_exit = paper_fill_price(price, 'sell')
+        estimated_proceeds = estimated_exit * t['shares'] - t['shares'] * PAPER_COMMISSION_PER_SHARE
+        estimated_pnl = estimated_proceeds - t.get('cost', entry * t['shares'])
         t.update({'current': round(price, 2), 'peak': round(peak, 2),
-                  'pnl': round((price - entry) * t['shares'], 2),
-                  'pnl_pct': round(pnl_pct, 2)})
+                  'pnl': round(estimated_pnl, 2),
+                  'pnl_pct': round(estimated_pnl / max(t.get('cost', entry * t['shares']), 0.01) * 100, 2)})
 
         if price >= t['target']: close_trade(tid, 'target'); continue
         if price <= t['stop']:   close_trade(tid, 'stop');   continue
@@ -1005,7 +1082,9 @@ def monitor_trades():
 
 def auto_entry():
     """Enter top-scored candidates automatically during market hours."""
-    if not market_open() or state['risk'].get('kill_switch'): return
+    if not AUTO_ENTRY_ENABLED or not market_open() or state['risk'].get('kill_switch'): return
+    if not scan_is_fresh():
+        return
     n = now_et(); mins = n.hour * 60 + n.minute
     if mins < 575: return                      # skip first 5 minutes
     scan = state['scan']
@@ -1085,9 +1164,10 @@ def index(): return send_from_directory('.', 'index.html')
 
 @app.route('/ping')
 def ping():
+    clock = refresh_market_clock()
     return _cors({'ok': True, 'time': now_str(), 'market': market_open(),
-                  'version': 'v6-paper-agent', 'mode': 'PAPER_ONLY', 'tg': state['tg_status'],
-                  'stream': state['stream_status']})
+                  'version': 'v7-paper-workstation', 'mode': 'PAPER_ONLY', 'tg': state['tg_status'],
+                  'stream': state['stream_status'], 'clock': clock, 'scan_status': state['scan_status']})
 
 @app.route('/risk')
 def risk_route():
@@ -1096,7 +1176,11 @@ def risk_route():
                              'daily_loss_limit_pct': DAILY_LOSS_LIMIT * 100,
                              'max_open_positions': MAX_OPEN_POSITIONS,
                              'max_trades_per_day': 'unlimited' if MAX_TRADES_PER_DAY == 0 else MAX_TRADES_PER_DAY,
-                             'max_deployed_pct': MAX_DEPLOYED_PCT * 100}})
+                             'max_deployed_pct': MAX_DEPLOYED_PCT * 100,
+                             'scan_stale_seconds': SCAN_STALE_SECONDS,
+                             'auto_entry_enabled': AUTO_ENTRY_ENABLED,
+                             'paper_slippage_bps': PAPER_SLIPPAGE_BPS,
+                             'paper_commission_per_share': PAPER_COMMISSION_PER_SHARE}})
 
 @app.route('/kill-switch', methods=['POST'])
 def kill_switch_route():
@@ -1112,7 +1196,7 @@ def scan_route():
 
 @app.route('/rescan', methods=['POST'])
 def rescan():
-    threading.Thread(target=lambda: run_scan(announce=False), daemon=True).start()
+    threading.Thread(target=lambda: run_scan_safely(announce=False), daemon=True).start()
     return _cors({'ok': True, 'msg': 'Scan started — refresh in ~30s'})
 
 @app.route('/prices')
@@ -1153,6 +1237,12 @@ def dashboard_route():
             'daily_pnl': state['daily_pnl'],
             'daily_loss_remaining': round(max(DAILY_LOSS_LIMIT * max(eq, STARTING_CAPITAL) + state['daily_pnl'], 0), 2),
             'entries_today': state['risk'].get('entries_today', 0),
+        },
+        'system': {
+            'scan_fresh': scan_is_fresh(), 'scan_age_seconds': round(max(time.time() - state['scan'].get('ts', time.time()), 0)),
+            'scan_status': state['scan_status'], 'clock': refresh_market_clock(),
+            'auto_entry_enabled': AUTO_ENTRY_ENABLED, 'paper_slippage_bps': PAPER_SLIPPAGE_BPS,
+            'paper_commission_per_share': PAPER_COMMISSION_PER_SHARE,
         },
         'performance': performance_metrics(),
     })
@@ -1291,11 +1381,11 @@ def job_premarket():
     if state['risk'].get('kill_reason', '').startswith('daily'):
         state['risk'].update({'kill_switch': False, 'kill_reason': ''})
     save_state()
-    run_scan(announce=True)
+    run_scan_safely(announce=True)
 
 def job_intraday_scan():
     if not market_open(): return
-    run_scan(announce=False)
+    run_scan_safely(announce=False)
 
 def job_minute():
     if now_et().weekday() >= 5: return
@@ -1336,18 +1426,19 @@ def job_keepalive():
 # BOOT
 # ══════════════════════════════════════════════════════════════════════
 load_state()
-log('Market Scanner Pro v5 starting…')
+log('Market Scanner Pro v7 paper workstation starting…')
 
 def _boot():
     try:
         refresh_prices()
-        run_scan(announce=False)
+        run_scan_safely(announce=False)
         start_stream()
     except Exception as e:
         print(f'boot scan: {e}')
-threading.Thread(target=_boot, daemon=True).start()
+if ENABLE_BACKGROUND_JOBS:
+    threading.Thread(target=_boot, daemon=True).start()
 
-if BackgroundScheduler:
+if ENABLE_BACKGROUND_JOBS and BackgroundScheduler:
     import atexit
     try:
         sched = BackgroundScheduler(timezone=ET)

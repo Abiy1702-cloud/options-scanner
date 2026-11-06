@@ -23,6 +23,14 @@ services:
         value: "0"
       - key: MAX_DEPLOYED_PCT
         value: "0.90"
+      - key: AUTO_ENTRY_ENABLED
+        value: "true"
+      - key: SCAN_STALE_SECONDS
+        value: "600"
+      - key: PAPER_SLIPPAGE_BPS
+        value: "5"
+      - key: PAPER_COMMISSION_PER_SHARE
+        value: "0.00"
       - key: STATE_FILE
         value: /var/data/state.json
       - key: JOURNAL_FILE
