@@ -64,6 +64,7 @@ SWING_MAX_DAYS   = 10       # trading days a swing may be held
 # ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
 # MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
 MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.90))
+MAX_DAILY_NOTIONAL   = float(os.environ.get('MAX_DAILY_NOTIONAL', 1000.0))
 MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 5))
 # Zero means no arbitrary daily-entry count. Capital, per-trade risk, loss
 # circuit breaker, cool-down, and duplicate-position controls still apply.
@@ -114,7 +115,7 @@ state = {
     'market_clock': {'checked_at': 0, 'is_open': None, 'next_open': '', 'next_close': '', 'source': 'fallback'},
     'scan_status': {'running': False, 'last_started': 0, 'last_completed': 0, 'last_error': ''},
     'risk': {'kill_switch': os.environ.get('PAPER_TRADING_ENABLED', 'true').lower() != 'true',
-             'kill_reason': '', 'entries_today': 0, 'realized_r_today': 0.0},
+             'kill_reason': '', 'entries_today': 0, 'realized_r_today': 0.0, 'daily_notional': 0.0},
 }
 _lock = threading.RLock()
 _scan_lock = threading.Lock()
@@ -203,6 +204,7 @@ def load_state():
         state['daily_pnl']  = 0.0
         state['risk']['entries_today'] = 0
         state['risk']['realized_r_today'] = 0.0
+        state['risk']['daily_notional'] = 0.0
         # A daily circuit breaker resets only on the next trading day.
         if state['risk'].get('kill_reason', '').startswith('daily'):
             state['risk'].update({'kill_switch': False, 'kill_reason': ''})
@@ -224,8 +226,10 @@ def paper_trade_plan(cand):
         risk_budget = eq * RISK_PER_TRADE
         position_cap = eq * (DAY_POS_CAP if cand.get('mode') == 'day' else SWING_POS_CAP)
         deployment_room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
+        daily_room = max(MAX_DAILY_NOTIONAL - float(state['risk'].get('daily_notional', 0)), 0)
+        daily_cost_per_share = entry + PAPER_COMMISSION_PER_SHARE
         shares = min(risk_budget / (entry - stop), position_cap / entry,
-                     deployment_room / entry, state['capital'] / entry)
+                     deployment_room / entry, daily_room / daily_cost_per_share, state['capital'] / entry)
         shares = int(shares)
         if shares < 1:
             return {'available': False, 'reason': 'insufficient paper buying power'}
@@ -973,13 +977,20 @@ def enter_trade(cand, manual=False):
     cap = eq * (DAY_POS_CAP if mode == 'day' else SWING_POS_CAP)
     shares = min(shares, cap / price)
     room = max(eq * MAX_DEPLOYED_PCT - deployed_value(), 0)
+    daily_room = max(MAX_DAILY_NOTIONAL - state['risk'].get('daily_notional', 0.0), 0)
+    if daily_room <= 0.01:
+        return False, 'Daily paper-trading budget reached'
+    daily_cost_per_share = price + PAPER_COMMISSION_PER_SHARE
     shares = min(shares, room / price)
+    shares = min(shares, daily_room / daily_cost_per_share)
     shares = round(shares, 4)
     entry_commission = round(shares * PAPER_COMMISSION_PER_SHARE, 2)
     cost = round(shares * price + entry_commission, 2)
     if shares <= 0 or cost > state['capital']:
         return False, f'Insufficient free cash (${state["capital"]:.0f})'
 
+    if state['risk'].get('daily_notional', 0.0) + cost > MAX_DAILY_NOTIONAL + 0.01:
+        return False, 'Daily paper-trading budget reached'
     tid = str(uuid.uuid4())[:8]
     state['trades'][tid] = {
         'id': tid, 'symbol': sym, 'mode': mode, 'entry': round(price, 2),
@@ -1000,6 +1011,7 @@ def enter_trade(cand, manual=False):
     _reset_symbol_entries_if_new_day()
     state['symbol_entries']['counts'][sym] = state['symbol_entries']['counts'].get(sym, 0) + 1
     state['risk']['entries_today'] = state['risk'].get('entries_today', 0) + 1
+    state['risk']['daily_notional'] = round(state['risk'].get('daily_notional', 0.0) + cost, 2)
     save_state()
     stream_set_symbols()
     rr = round((target - price) / (price - stop), 1)
@@ -1177,6 +1189,7 @@ def risk_route():
                              'max_open_positions': MAX_OPEN_POSITIONS,
                              'max_trades_per_day': 'unlimited' if MAX_TRADES_PER_DAY == 0 else MAX_TRADES_PER_DAY,
                              'max_deployed_pct': MAX_DEPLOYED_PCT * 100,
+                             'max_daily_notional': MAX_DAILY_NOTIONAL,
                              'scan_stale_seconds': SCAN_STALE_SECONDS,
                              'auto_entry_enabled': AUTO_ENTRY_ENABLED,
                              'paper_slippage_bps': PAPER_SLIPPAGE_BPS,
@@ -1237,6 +1250,8 @@ def dashboard_route():
             'daily_pnl': state['daily_pnl'],
             'daily_loss_remaining': round(max(DAILY_LOSS_LIMIT * max(eq, STARTING_CAPITAL) + state['daily_pnl'], 0), 2),
             'entries_today': state['risk'].get('entries_today', 0),
+            'daily_notional': state['risk'].get('daily_notional', 0.0),
+            'daily_notional_remaining': round(max(MAX_DAILY_NOTIONAL - state['risk'].get('daily_notional', 0.0), 0), 2),
         },
         'system': {
             'scan_fresh': scan_is_fresh(), 'scan_age_seconds': round(max(time.time() - state['scan'].get('ts', time.time()), 0)),
@@ -1378,6 +1393,7 @@ def job_premarket():
     state['daily_date'] = today(); state['daily_pnl'] = 0.0
     state['risk']['entries_today'] = 0
     state['risk']['realized_r_today'] = 0.0
+    state['risk']['daily_notional'] = 0.0
     if state['risk'].get('kill_reason', '').startswith('daily'):
         state['risk'].update({'kill_switch': False, 'kill_reason': ''})
     save_state()
@@ -1393,6 +1409,7 @@ def job_minute():
         state['daily_date'] = today(); state['daily_pnl'] = 0.0
         state['risk']['entries_today'] = 0
         state['risk']['realized_r_today'] = 0.0
+        state['risk']['daily_notional'] = 0.0
         if state['risk'].get('kill_reason', '').startswith('daily'):
             state['risk'].update({'kill_switch': False, 'kill_reason': ''})
     if market_open():

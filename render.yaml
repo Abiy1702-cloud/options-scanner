@@ -23,6 +23,8 @@ services:
         value: "0"
       - key: MAX_DEPLOYED_PCT
         value: "0.90"
+      - key: MAX_DAILY_NOTIONAL
+        value: "1000"
       - key: AUTO_ENTRY_ENABLED
         value: "true"
       - key: SCAN_STALE_SECONDS

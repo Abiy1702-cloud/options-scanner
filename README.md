@@ -15,9 +15,13 @@ greeks, spreads, assignment, or early exercise.
 - The agent allows at most 5 open positions and 90% total deployed capital.
   Daily entries are not arbitrarily capped; duplicate-position, re-entry,
   capital, and loss controls still apply.
+- A hard $1,000 daily paper-notional budget limits the combined value of new
+  simulated entries in one session. It includes the configured paper slippage
+  and commission assumptions, and resets at the next trading session.
 - A 2.5% daily loss limit and a 3R daily limit disable new entries.
 - `POST /kill-switch` (PIN protected) disables all new paper entries. Existing
-  simulated positions keep being monitored and can be closed manually.
+  simulated positions keep being monitored. The public dashboard deliberately
+  has no manual scan, stop, entry, or close controls; it runs automatically.
 - Each entry, exit, and kill-switch action is recorded in `trade_journal.jsonl`.
 - `GET /risk` exposes the mode, current breaker state, and enforced limits.
 - Candidate rows include a real, active Alpaca call contract when one is
@@ -56,7 +60,7 @@ stores both state and journals there. Render's default filesystem is ephemeral,
 so do not remove those two environment variables when deploying manually.
 
 Useful non-secret settings in the blueprint are `AUTO_ENTRY_ENABLED`,
-`SCAN_STALE_SECONDS`, `PAPER_SLIPPAGE_BPS`, and
+`SCAN_STALE_SECONDS`, `PAPER_SLIPPAGE_BPS`, `MAX_DAILY_NOTIONAL`, and
 `PAPER_COMMISSION_PER_SHARE`. Do not set the Alpaca trading base URL to a live
 endpoint in this application: it is intentionally read-only and paper-only.
 
@@ -65,17 +69,15 @@ endpoint in this application: it is intentionally read-only and paper-only.
 1. Open `/ping` and confirm `mode` is `PAPER_ONLY` and version is
    `v6-paper-agent`.
 2. Open `/risk` and confirm the displayed limits before enabling entries.
-3. Use the dashboard PIN to track only a reviewed candidate; verify a matching
-   `entry` record is written to the journal.
-4. Set the kill switch with `POST /kill-switch` and confirm `/enter` returns a
-   paper-entry-disabled message.
-5. Let a stopped/targeted position close and review `exit_reason`, P&L, and
+3. Confirm the Daily Trading Budget card never exceeds $1,000 in accumulated
+   paper entry value.
+4. Let a stopped/targeted position close and review `exit_reason`, P&L, and
    the journal record. Do not evaluate strategy quality until at least 30–50
    closed paper trades across multiple market regimes.
-6. Use the market pulse and paper plan as a review aid, not a forecast. Check
+5. Use the market pulse and paper plan as a review aid, not a forecast. Check
    that capital deployment, open-position risk, and the daily-loss circuit breaker
    remain within your comfort level before allowing new simulated entries.
-7. Run `py -3 -m unittest -v test_paper_agent.py` from the repository root.
+6. Run `py -3 -m unittest -v test_paper_agent.py test_daily_budget.py` from the repository root.
    For a no-background-worker app smoke test, set
    `ENABLE_BACKGROUND_JOBS=false` first.
 
