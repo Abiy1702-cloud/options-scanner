@@ -11,8 +11,8 @@ greeks, spreads, assignment, or early exercise.
 - Entry selection rejects low-priced, thin, and parabolic momentum candidates,
   while treating incomplete daily volume as a score input rather than an
   intraday hard gate.
-- Risk is 0.75% of equity per entry by default, with 18–20% per-position caps.
-- The agent allows at most 5 open positions and 90% total deployed capital.
+- Risk is 0.75% of equity per entry by default, with 20% per-position caps.
+- The agent allows at most 5 open positions and up to 100% total simulated deployment.
   Daily entries are not arbitrarily capped; duplicate-position, re-entry,
   capital, and loss controls still apply.
 - A hard $1,000 daily paper-notional budget limits the combined value of new

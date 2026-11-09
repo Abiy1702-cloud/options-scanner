@@ -22,7 +22,7 @@ services:
       - key: MAX_TRADES_PER_DAY
         value: "0"
       - key: MAX_DEPLOYED_PCT
-        value: "0.90"
+        value: "1.00"
       - key: MAX_DAILY_NOTIONAL
         value: "1000"
       - key: AUTO_ENTRY_ENABLED

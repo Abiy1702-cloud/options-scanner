@@ -6,28 +6,28 @@
 <title>Abiy Trading — Paper Desk</title>
 <style>
 :root{
-  --bg:#080b14; --panel:rgba(18,24,38,.90); --panel2:#0d1321; --border:#26334a;
-  --text:#edf3ff; --dim:#91a0b6; --green:#35d07f; --red:#fb5e6d;
-  --blue:#63a7ff; --amber:#ffbf55; --purple:#b49aff; --cyan:#48d6dc;
+  --bg:#000; --panel:#050505; --panel2:#101010; --border:#242424;
+  --text:#fff; --dim:#8a8a8a; --green:#00c805; --red:#ff5000;
+  --blue:#00c805; --amber:#ffd23f; --purple:#a9f4ab; --cyan:#00c805;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:radial-gradient(circle at 12% -8%,#192b54 0,transparent 31%),radial-gradient(circle at 95% 8%,#162141 0,transparent 28%),var(--bg);color:var(--text);font-family:Inter,'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
-.wrap{max-width:1220px;margin:0 auto;padding:22px 16px 36px}
+body{background:var(--bg);color:var(--text);font-family:Inter,'Segoe UI',system-ui,sans-serif;font-size:14px;min-height:100vh}
+.wrap{max-width:1100px;margin:0 auto;padding:22px 16px 80px}
 header{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-bottom:16px;padding:4px 2px}
-.brand{display:flex;align-items:center;gap:11px}.brand-mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-weight:900;letter-spacing:-1px;color:#fff;background:linear-gradient(135deg,#6aa9ff,#704bd6 58%,#40d9d6);box-shadow:0 8px 22px rgba(72,121,231,.32)}
+.brand{display:flex;align-items:center;gap:11px}.brand-mark{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-weight:900;letter-spacing:-1px;color:#000;background:var(--green);box-shadow:0 0 0 5px rgba(0,200,5,.1)}
 .brand-copy h1{font-size:22px;font-weight:850;letter-spacing:-.8px;line-height:1.02}.brand-copy h1 span{color:var(--blue)}.brand-copy p{font-size:10px;color:var(--dim);margin-top:4px;letter-spacing:.55px;text-transform:uppercase}
-.badge{font-size:10px;padding:5px 9px;border-radius:20px;border:1px solid var(--border);color:var(--dim);background:rgba(9,14,25,.6);text-transform:uppercase;letter-spacing:.45px}
+.badge{font-size:10px;padding:5px 9px;border-radius:20px;border:1px solid var(--border);color:var(--dim);background:#101010;text-transform:uppercase;letter-spacing:.45px}
 .badge.on{color:var(--green);border-color:var(--green)}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin-bottom:14px}
-.stat{background:linear-gradient(145deg,rgba(28,37,57,.94),rgba(15,21,35,.91));border:1px solid var(--border);border-radius:13px;padding:12px 14px;box-shadow:0 12px 28px rgba(0,0,0,.15)}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
 .stat .lbl{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
 .stat .val{font-size:20px;font-weight:750;margin-top:4px;letter-spacing:-.4px}
 .pos{color:var(--green)} .neg{color:var(--red)}
-.tabs{display:flex;gap:8px;margin-bottom:14px;padding:4px;background:rgba(7,11,20,.5);border:1px solid var(--border);border-radius:13px}
+.tabs{display:flex;gap:8px;margin-bottom:14px;padding:4px;background:#101010;border:1px solid var(--border);border-radius:13px}
 .tab{flex:1;padding:10px;text-align:center;background:transparent;border:1px solid transparent;
   border-radius:9px;cursor:pointer;font-weight:700;color:var(--dim);font-size:14px}
-.tab.active{color:#fff;background:linear-gradient(135deg,#254c89,#1b2c58);border-color:#426dad;box-shadow:0 4px 14px rgba(57,111,203,.24)}
-.panel{background:linear-gradient(145deg,rgba(20,28,45,.94),rgba(12,18,31,.94));border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 14px 35px rgba(0,0,0,.16)}
+.tab.active{color:#000;background:var(--green);border-color:var(--green)}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
 .panel h2{font-size:14px;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .panel h2 .sub{font-size:11px;color:var(--dim);font-weight:400}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -55,15 +55,16 @@ canvas{width:100%;height:170px;display:block}
 .ai-box{background:var(--panel2);border-radius:8px;padding:11px;font-size:13px;white-space:pre-wrap;line-height:1.5;margin-top:8px}
 .tag{font-size:10px;padding:2px 7px;border-radius:5px;font-weight:700;letter-spacing:.5px}
 .tag.day{background:#172554;color:#93c5fd}.tag.swing{background:#3b1d54;color:#d8b4fe}
-.warn{background:linear-gradient(90deg,rgba(105,70,8,.35),rgba(43,29,5,.42));border:1px solid #785d22;color:#ffd27c;border-radius:11px;padding:10px 13px;font-size:12px;margin-bottom:14px}
+.warn{background:#121212;border:1px solid #2d2d2d;color:#c8c8c8;border-radius:11px;padding:10px 13px;font-size:12px;margin-bottom:14px}
 .pulse{display:grid;grid-template-columns:1.1fr repeat(3,minmax(110px,1fr));gap:10px;margin-bottom:14px}
 .pulse .stat{min-height:74px}.regime{font-size:18px;letter-spacing:.5px}.risk-on{color:var(--green)}.risk-off{color:var(--red)}.mixed{color:var(--amber)}
-.meter{height:7px;background:var(--panel2);border-radius:8px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--blue);border-radius:8px}
+.meter{height:7px;background:#262626;border-radius:8px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--green);border-radius:8px}
 .plan{font-size:11px;color:#c4b5fd;margin-top:4px}.exit-tags{display:flex;gap:6px;flex-wrap:wrap}.exit-tags span{padding:3px 7px;border-radius:6px;background:var(--panel2);font-size:11px;color:var(--dim)}
 .quality{font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:5px;margin-left:5px;color:#c4b5fd}
 .system-line{margin-top:7px;font-size:11px;color:var(--dim)}.system-line b{color:var(--text)}
-.desk-strip{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:-2px 0 14px}.desk-chip{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:9px;background:rgba(13,20,35,.72);border:1px solid var(--border);font-size:11px;color:var(--dim)}.desk-chip b{color:var(--text)}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(53,208,127,.12)}
-@media(max-width:700px){.wrap{padding:14px 10px 28px}.pulse{grid-template-columns:repeat(2,1fr)}.brand-copy h1{font-size:21px}header .badge{font-size:9px}.desk-strip{gap:6px}.desk-chip{padding:6px 8px}th:nth-child(6),td:nth-child(6){display:none}.panel{padding:12px;overflow:auto}}
+.desk-strip{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:-2px 0 14px}.desk-chip{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:9px;background:#101010;border:1px solid var(--border);font-size:11px;color:var(--dim)}.desk-chip b{color:var(--text)}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(0,200,5,.12)}
+.hero{padding:20px 4px 8px;margin-bottom:10px}.hero-kicker{font-size:12px;color:var(--dim);font-weight:650}.hero-value{font-size:38px;font-weight:800;letter-spacing:-1.8px;margin-top:5px}.hero-change{font-size:13px;margin-top:7px;color:var(--green);font-weight:650}.hero-change.flat{color:var(--dim)}.hero canvas{height:128px;margin-top:8px}.bottom-nav{display:none}
+@media(max-width:700px){.wrap{padding:14px 10px 94px}.pulse{grid-template-columns:repeat(2,1fr)}.brand-copy h1{font-size:21px}header .badge{font-size:9px}.desk-strip{gap:6px}.desk-chip{padding:6px 8px}.hero-value{font-size:35px}th:nth-child(6),td:nth-child(6){display:none}.panel{padding:12px;overflow:auto}.bottom-nav{position:fixed;z-index:20;display:flex;align-items:center;justify-content:space-around;left:14px;right:14px;bottom:14px;background:rgba(28,28,28,.94);border:1px solid #3a3a3a;border-radius:28px;padding:8px;backdrop-filter:blur(18px);box-shadow:0 12px 35px rgba(0,0,0,.55)}.bottom-nav button{background:transparent;color:#aaa;padding:9px 14px;border-radius:20px}.bottom-nav button.active{background:#000;color:var(--green)}}
 </style>
 </head>
 <body>
@@ -89,9 +90,16 @@ canvas{width:100%;height:170px;display:block}
     <div class="desk-chip"><b>Risk rails</b> loss, exposure &amp; stale-scan protection</div>
   </div>
 
+  <section class="hero">
+    <div class="hero-kicker">Abiy Trading · Paper Portfolio</div>
+    <div class="hero-value" id="hero-equity">—</div>
+    <div class="hero-change flat" id="hero-change">Loading portfolio performance…</div>
+    <canvas id="hero-chart" height="128"></canvas>
+  </section>
+
   <div class="stats">
     <div class="stat"><div class="lbl">Equity</div><div class="val" id="s-eq">—</div></div>
-    <div class="stat"><div class="lbl">Free Cash</div><div class="val" id="s-cash">—</div></div>
+    <div class="stat"><div class="lbl">Capital at Work</div><div class="val" id="s-cash">—</div></div>
     <div class="stat"><div class="lbl">Today P&L</div><div class="val" id="s-day">—</div></div>
     <div class="stat"><div class="lbl">Total P&L</div><div class="val" id="s-tot">—</div></div>
     <div class="stat"><div class="lbl">Win Rate</div><div class="val" id="s-wr">—</div></div>
@@ -169,6 +177,10 @@ canvas{width:100%;height:170px;display:block}
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<nav class="bottom-nav" aria-label="Dashboard navigation">
+  <button class="active" id="nav-trade" onclick="showTab('trade')">⌁ Trade</button>
+  <button id="nav-progress" onclick="showTab('progress')">◔ Progress</button>
+</nav>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -182,6 +194,8 @@ function showTab(t){
   $('view-progress').style.display = t==='progress'?'block':'none';
   $('tab-trade').classList.toggle('active',t==='trade');
   $('tab-progress').classList.toggle('active',t==='progress');
+  $('nav-trade').classList.toggle('active',t==='trade');
+  $('nav-progress').classList.toggle('active',t==='progress');
   if(t==='progress') loadProgress();
 }
 
@@ -293,7 +307,7 @@ async function loadTrades(){
   try{
     const d = await api('/trades');
     $('s-eq').textContent   = money(d.equity);
-    $('s-cash').textContent = money(d.capital);
+    $('s-cash').textContent = money((d.limits||{}).deployed_value);
     $('s-day').textContent  = money(d.daily_pnl);
     $('s-day').className    = 'val '+cls(d.daily_pnl);
     const t = d.trades||[];
@@ -317,6 +331,9 @@ async function loadProgress(){
     const d = await api('/performance');
     $('s-tot').textContent = money(d.total_pnl); $('s-tot').className='val '+cls(d.total_pnl);
     $('s-wr').textContent  = d.trades?d.win_rate+'%':'—';
+    $('hero-equity').textContent = money(d.equity);
+    $('hero-change').textContent = (d.total_pnl>=0?'▲ ':'▼ ')+money(Math.abs(d.total_pnl))+' total paper P&L';
+    $('hero-change').className = 'hero-change '+cls(d.total_pnl);
     $('p-n').textContent   = d.trades+' ('+d.wins+'W/'+d.losses+'L)';
     $('p-aw').textContent  = money(d.avg_win);
     $('p-al').textContent  = money(d.avg_loss);
@@ -343,6 +360,7 @@ async function loadProgress(){
     const pts = [{date:'start',equity:d.starting_capital}, ...eh];
     if(d.equity!=null) pts.push({date:'now',equity:d.equity});
     lineChart('eq-chart', pts.map(p=>p.equity), pts.map(p=>p.date));
+    lineChart('hero-chart', pts.map(p=>p.equity), pts.map(p=>p.date));
 
     // daily pnl
     const days = Object.entries(d.by_day||{}).sort((a,b)=>b[0].localeCompare(a[0])).slice(0,20);

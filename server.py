@@ -54,7 +54,7 @@ STARTING_CAPITAL = float(os.environ.get('STARTING_CAPITAL', 1000))
 # validation harness, not a promise of returns or a live order router.
 RISK_PER_TRADE   = float(os.environ.get('RISK_PER_TRADE', 0.0075))
 DAY_POS_CAP      = float(os.environ.get('DAY_POS_CAP', 0.20))
-SWING_POS_CAP    = float(os.environ.get('SWING_POS_CAP', 0.18))
+SWING_POS_CAP    = float(os.environ.get('SWING_POS_CAP', 0.20))
 MIN_PRICE        = float(os.environ.get('MIN_PRICE', 10.0))
 MAX_PRICE        = 2000.0
 MIN_DOLLAR_VOL   = float(os.environ.get('MIN_DOLLAR_VOL', 20e6))
@@ -63,7 +63,9 @@ SWING_MAX_DAYS   = 10       # trading days a swing may be held
 
 # ── Position sizing is now uncapped by count — no MAX_DAY_TRADES / ─────
 # MAX_SWING_TRADES. Instead, "how many at once" is governed by capital:
-MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 0.90))
+# Paper deployment can use the full simulated account, but quality, daily-loss,
+# scan-freshness, and duplicate-position guards still decide whether to enter.
+MAX_DEPLOYED_PCT     = float(os.environ.get('MAX_DEPLOYED_PCT', 1.00))
 MAX_DAILY_NOTIONAL   = float(os.environ.get('MAX_DAILY_NOTIONAL', 1000.0))
 MAX_OPEN_POSITIONS   = int(os.environ.get('MAX_OPEN_POSITIONS', 5))
 # Zero means no arbitrary daily-entry count. Capital, per-trade risk, loss
