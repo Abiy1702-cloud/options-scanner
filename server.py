@@ -93,6 +93,7 @@ ALPACA_DATA_FEED = os.environ.get('ALPACA_DATA_FEED', 'iex')   # 'iex' = free re
 CORE = ['NVDA','TSLA','AMD','AAPL','MSFT','META','AMZN','GOOGL','PLTR','COIN',
         'HOOD','SOFI','MSTR','SMCI','AVGO','MU','ARM','APP','RKLB','HIMS',
         'SOXL','TQQQ','ASTS','SMR','UPST']
+FOCUS_SYMBOLS = ['NVDA', 'QQQ', 'SPY', 'TSLA', 'MU', 'GOOGL', 'MSFT', 'AMD', 'AMZN', 'META']
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 
@@ -114,6 +115,8 @@ state = {
     'symbol_entries': {'date': '', 'counts': {}},  # entries per symbol today
     'stream_status': {'connected': False, 'authed': False, 'error': '', 'last_tick': 0, 'symbols': 0},
     'option_cache': {},
+    'news': {'articles': [], 'ts': 0, 'symbols': [], 'status': 'waiting'},
+    'focus': {'items': [], 'ts': 0, 'status': 'waiting'},
     'market_clock': {'checked_at': 0, 'is_open': None, 'next_open': '', 'next_close': '', 'source': 'fallback'},
     'scan_status': {'running': False, 'last_started': 0, 'last_completed': 0, 'last_error': ''},
     'risk': {'kill_switch': os.environ.get('PAPER_TRADING_ENABLED', 'true').lower() != 'true',
@@ -473,6 +476,39 @@ def enrich_with_real_calls(candidates):
         if cand['call_candidate'].get('available'): stats['available'] += 1
     return stats
 
+def refresh_news(symbols):
+    """Fetch a compact, read-only headline brief for symbols currently in focus."""
+    symbols = sorted({s for s in symbols if _clean_symbol(s)})[:12]
+    cached = state['news']
+    if cached.get('symbols') == symbols and time.time() - cached.get('ts', 0) < 300:
+        return cached
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        state['news'] = {'articles': [], 'ts': time.time(), 'symbols': symbols,
+                         'status': 'Alpaca news credentials unavailable'}
+        return state['news']
+    start = (now_et() - timedelta(days=3)).strftime('%Y-%m-%d')
+    data = _alpaca_get('/v1beta1/news', {
+        'symbols': ','.join(symbols), 'start': start, 'sort': 'desc', 'limit': 8,
+    })
+    if not isinstance(data, dict):
+        state['news'] = {'articles': [], 'ts': time.time(), 'symbols': symbols,
+                         'status': 'Market-news feed unavailable'}
+        return state['news']
+    articles = []
+    for item in data.get('news', []):
+        url = str(item.get('url') or '')
+        articles.append({
+            'headline': str(item.get('headline') or 'Untitled market update')[:240],
+            'summary': str(item.get('summary') or '')[:280],
+            'source': str(item.get('source') or 'Market news')[:80],
+            'symbols': [s for s in item.get('symbols', []) if _clean_symbol(s)][:4],
+            'created_at': item.get('created_at') or item.get('updated_at') or '',
+            'url': url if url.startswith(('https://', 'http://')) else '',
+        })
+    state['news'] = {'articles': articles, 'ts': time.time(), 'symbols': symbols,
+                     'status': 'ok' if articles else 'No recent headlines for current focus'}
+    return state['news']
+
 def _clean_symbol(s):
     s = (s or '').upper().strip()
     if not s or len(s) > 5 or not s.isalpha(): return None
@@ -675,6 +711,9 @@ def run_scan(announce=False):
     day, swing, n, diag = deep_scan()
     diag['day_call_contracts'] = enrich_with_real_calls(day)
     diag['swing_call_contracts'] = enrich_with_real_calls(swing)
+    focus_symbols = [c['symbol'] for c in (day[:6] + swing[:6])]
+    focus_symbols += [t['symbol'] for t in state['trades'].values()]
+    refresh_news(focus_symbols or CORE[:8])
     # Make candidate sizing auditable before an automatic paper entry is considered.
     # This is intentionally informational; enter_trade always re-checks risk.
     for cand in day + swing:
@@ -796,6 +835,45 @@ def refresh_prices():
     if prices:
         state['prices'].update(prices)
         state['price_ts'] = time.time()
+    refresh_focus_board()
+
+def refresh_focus_board():
+    """Compact, explainable real-time technical outlook for the core watchlist."""
+    cached = state['focus']
+    if time.time() - cached.get('ts', 0) < 30:
+        return cached
+    if not ALPACA_KEY or not ALPACA_SECRET:
+        state['focus'] = {'items': [], 'ts': time.time(),
+                          'status': 'Alpaca market-data credentials unavailable'}
+        return state['focus']
+    data = _alpaca_get('/v2/stocks/snapshots', {'symbols': ','.join(FOCUS_SYMBOLS)})
+    if not isinstance(data, dict):
+        state['focus'] = {'items': [], 'ts': time.time(),
+                          'status': 'Real-time outlook unavailable'}
+        return state['focus']
+    items = []
+    for sym in FOCUS_SYMBOLS:
+        snap = data.get(sym) or {}
+        try:
+            trade = (snap.get('latestTrade') or {}).get('p')
+            daily = snap.get('dailyBar') or {}
+            price = float(trade or daily.get('c'))
+            open_price = float(daily.get('o') or price)
+            vwap = float(daily.get('vw') or price)
+            pct = (price - open_price) / open_price * 100 if open_price else 0.0
+            if price > vwap and pct >= 0.25:
+                outlook, reason = 'BULLISH', 'above session VWAP'
+            elif price < vwap and pct <= -0.25:
+                outlook, reason = 'DEFENSIVE', 'below session VWAP'
+            else:
+                outlook, reason = 'WATCH', 'mixed intraday signals'
+            items.append({'symbol': sym, 'price': round(price, 2), 'pct': round(pct, 2),
+                          'vwap': round(vwap, 2), 'outlook': outlook, 'reason': reason})
+        except (TypeError, ValueError):
+            continue
+    state['focus'] = {'items': items, 'ts': time.time(),
+                      'status': 'ok' if items else 'No current focus quotes'}
+    return state['focus']
 
 def cp(sym): return state['prices'].get(sym)
 
@@ -814,7 +892,7 @@ def _stream_symbols_wanted():
     syms = {t['symbol'] for t in state['trades'].values()}
     for c in state['scan'].get('day', [])[:15]:   syms.add(c['symbol'])
     for c in state['scan'].get('swing', [])[:15]: syms.add(c['symbol'])
-    syms |= {'SPY', 'QQQ'}
+    syms |= set(FOCUS_SYMBOLS)
     return syms
 
 def stream_set_symbols():
@@ -1161,7 +1239,7 @@ def _cors(data, status=200):
     return r
 
 PUBLIC = {'/', '/ping', '/scan', '/trades', '/performance', '/logs', '/risk',
-          '/candles', '/technicals', '/analysis-result', '/prices', '/dashboard'}
+          '/candles', '/technicals', '/analysis-result', '/prices', '/dashboard', '/news', '/focus'}
 
 @app.before_request
 def auth():
@@ -1208,6 +1286,14 @@ def kill_switch_route():
 @app.route('/scan')
 def scan_route():
     return _cors({**state['scan'], 'market_open': market_open()})
+
+@app.route('/news')
+def news_route():
+    return _cors(state['news'])
+
+@app.route('/focus')
+def focus_route():
+    return _cors(state['focus'])
 
 @app.route('/rescan', methods=['POST'])
 def rescan():

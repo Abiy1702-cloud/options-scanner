@@ -27,6 +27,13 @@ greeks, spreads, assignment, or early exercise.
 - Candidate rows include a real, active Alpaca call contract when one is
   available in the selected strike and expiry window. This is read-only research
   data; the service does not paper-trade or submit option orders.
+- Market Brief displays recent, symbol-filtered Alpaca headlines for the current
+  candidates and open positions. It is cached, read-only research and is not an
+  entry or exit signal.
+- Focus Board watches NVDA, QQQ, SPY, TSLA, MU, Alphabet, Microsoft, and liquid
+  peers with Alpaca snapshot data. Its Bullish / Watch / Defensive label is an
+  explainable intraday technical outlook using daily move and session VWAP, not a
+  price prediction or trade instruction.
 - The trader dashboard now provides an explainable market pulse (SPY/QQQ),
   deployment and daily-loss room, and a pre-entry simulated share/cost/risk plan
   for every candidate. The risk engine re-checks all values at the actual entry.
